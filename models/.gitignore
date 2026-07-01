@@ -1,0 +1,10 @@
+# Ignore large binary model files
+*.bin
+*.gguf
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Ignore CTranslate2 .gitattributes (downloaded with model)
+.gitattributes

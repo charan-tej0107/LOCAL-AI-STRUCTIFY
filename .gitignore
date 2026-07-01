@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+*.pyo
+*.whl
+
+# Virtual environment
+venv/
+.env/
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+uploads/
+cache/
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+!.env.example
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Coverage
+coverage/
+.coverage
+htmlcov/

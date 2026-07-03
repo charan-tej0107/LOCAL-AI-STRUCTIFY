@@ -19,6 +19,10 @@ from utils import human_readable_size, get_logger
 logger = get_logger(__name__)
 
 
+def _format_confidence(score: float | None) -> str:
+    return "—" if score is None else f"{score:.0%}"
+
+
 def render() -> None:
     """Render the results page."""
     section_header("Processing Results")
@@ -64,7 +68,7 @@ def render() -> None:
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Confidence", f"{doc.confidence_score:.0%}" if doc.confidence_score else "—")
+        st.metric("Confidence", _format_confidence(doc.confidence_score))
     with col2:
         st.metric("Processing Time", f"{doc.processing_time:.1f}s" if doc.processing_time else "—")
     with col3:

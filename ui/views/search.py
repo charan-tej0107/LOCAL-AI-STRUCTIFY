@@ -58,6 +58,6 @@ def render() -> None:
                     st.session_state.selected_doc_id = doc.id
                     st.session_state[PAGE_KEY] = "Results"
                     st.rerun()
-            if doc.confidence_score:
+            if doc.confidence_score is not None:
                 confidence_bar(doc.confidence_score)
             st.divider()

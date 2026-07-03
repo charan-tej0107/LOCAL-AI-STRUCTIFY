@@ -23,6 +23,10 @@ from ui.components import (
 from utils import human_readable_size, run_all_checks
 
 
+def _format_confidence(score: float | None) -> str:
+    return "—" if score is None else f"{score:.0%}"
+
+
 def render() -> None:
     """Render the dashboard page."""
     section_header("Dashboard")
@@ -97,7 +101,7 @@ def render() -> None:
             with cols[1]:
                 status_badge(doc.status.value)
             with cols[2]:
-                st.caption(f"{doc.confidence_score:.0%}" if doc.confidence_score else "—")
+                st.caption(_format_confidence(doc.confidence_score))
             with cols[3]:
                 st.caption(
                     datetime.fromtimestamp(doc.created_at).strftime("%H:%M")

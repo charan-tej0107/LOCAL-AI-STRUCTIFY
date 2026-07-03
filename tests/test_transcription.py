@@ -286,6 +286,36 @@ class TestTranscriberEngine:
         assert result.segments == []
         assert result.confidence == 0.0
 
+    @patch("extraction.transcription.engine.TranscriberEngine._load_model")
+    def test_uses_language_probability_when_segment_confidence_missing(
+        self,
+        mock_load: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        wav = _dummy_wav(tmp_path / "speech_no_logprob.wav")
+        engine = TranscriberEngine(model_dir=tmp_path / "base", use_cache=False)
+
+        fake_seg = MagicMock()
+        fake_seg.start = 0.0
+        fake_seg.end = 1.0
+        fake_seg.text = " hello world "
+        fake_seg.avg_logprob = None
+
+        fake_info = MagicMock()
+        fake_info.language = "en"
+        fake_info.language_probability = 0.92
+        fake_info.duration = 1.0
+
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = ([fake_seg], fake_info)
+        mock_load.return_value = mock_model
+
+        with patch.object(engine, "is_model_downloaded", return_value=True):
+            result = engine.transcribe(wav)
+
+        assert result.text == "hello world"
+        assert result.confidence == 0.92
+
     def test_is_available_true_after_patch(self) -> None:
         with patch.dict("sys.modules", {"faster_whisper": MagicMock()}):
             engine = TranscriberEngine()

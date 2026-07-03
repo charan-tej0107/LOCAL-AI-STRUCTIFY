@@ -129,7 +129,6 @@ class TranscriberEngine:
                 beam_size=self._beam_size,
                 temperature=self._temperature,
                 vad_filter=self._vad_enabled,
-                cpu_threads=self._n_threads,
             )
         except Exception as exc:
             logger.error("Transcription failed for %s: %s", audio_path.name, exc)
@@ -154,6 +153,10 @@ class TranscriberEngine:
                 conf_values.append(float(seg.avg_logprob))
 
         text = " ".join(text_parts)
+        detected_lang = info.language if info else self._language
+        lang_prob = info.language_probability if info else 0.0
+        duration = info.duration if info else 0.0
+
         # Convert average log probability into a normalized confidence (0.0–1.0)
         if conf_values:
             avg_logprob = sum(conf_values) / len(conf_values)
@@ -162,12 +165,10 @@ class TranscriberEngine:
 
             # Clamp to [0, 1]
             confidence = max(0.0, min(confidence, 1.0))
-        else: 
+        elif text.strip() and lang_prob:
+            confidence = max(0.0, min(float(lang_prob), 1.0))
+        else:
             confidence = 0.0
-
-        detected_lang = info.language if info else self._language
-        lang_prob = info.language_probability if info else 0.0
-        duration = info.duration if info else 0.0
 
         logger.info("Inference completed for %s in %.1fs", audio_path.name, elapsed)
         logger.info("Transcript length: %d characters", len(text))

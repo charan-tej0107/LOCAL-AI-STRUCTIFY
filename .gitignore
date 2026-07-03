@@ -45,3 +45,7 @@ logs/
 coverage/
 .coverage
 htmlcov/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/test.db

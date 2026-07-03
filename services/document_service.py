@@ -1,23 +1,23 @@
 """Document management — upload tracking, metadata, retrieval.
 
-In-memory store (will be backed by SQLite when the database module
-is built).
+SQLite-backed persistent implementation.
 """
 
 from __future__ import annotations
 
+import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from database import init_db, SessionLocal, DocumentRepository, Document
 from utils import get_logger, ProcessingStatus, DuplicateError
 
 logger = get_logger(__name__)
 
-# ── In-memory document store ──────────────────────────────────────────
-
-_documents: dict[str, "DocumentRecord"] = {}
+# ── Document model (unchanged) ──────────────────────────────────────────
 
 
 @dataclass
@@ -44,11 +44,64 @@ class DocumentRecord:
         return self.status == ProcessingStatus.DUPLICATE
 
 
-def _next_id() -> str:
-    return f"doc_{int(time.time() * 1000)}_{len(_documents)}"
+# ── Internal helpers ────────────────────────────────────────────────────
+
+_db_initialized = False
 
 
-# ── Public API ────────────────────────────────────────────────────────
+def _ensure_db() -> None:
+    global _db_initialized
+    if not _db_initialized:
+        init_db()
+        _db_initialized = True
+
+
+def _new_doc_id() -> str:
+    return f"doc_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+
+
+def _status_from_db(value: str) -> ProcessingStatus:
+    try:
+        return ProcessingStatus(value)
+    except ValueError:
+        return ProcessingStatus.FAILED
+
+
+def _json_to_db(value: dict[str, Any] | None) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, default=str)
+
+
+def _json_from_db(value: str | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _to_record(doc: Document) -> DocumentRecord:
+    return DocumentRecord(
+        id=doc.id,
+        filename=doc.filename,
+        file_path=Path(doc.file_path),
+        file_size=doc.file_size,
+        mime_type=doc.mime_type,
+        file_hash=doc.file_hash,
+        status=_status_from_db(doc.status),
+        created_at=doc.created_at,
+        updated_at=doc.updated_at,
+        extracted_text=doc.extracted_text or "",
+        structured_json=_json_from_db(doc.structured_json),
+        confidence_score=doc.confidence_score,
+        error_message=doc.error_message or "",
+        processing_time=doc.processing_time,
+    )
+
+
+# ── Public API ──────────────────────────────────────────────────────────
 
 
 def register_upload(
@@ -68,40 +121,67 @@ def register_upload(
     Raises:
         DuplicateError: If *file_hash* is non-empty and already exists.
     """
-    if file_hash and find_by_hash(file_hash) is not None:
-        existing = find_by_hash(file_hash)
-        raise DuplicateError(
-            f"File '{filename}' is a duplicate of '{existing.filename}'",
-            details={"existing_id": existing.id, "hash": file_hash},
-        )
+    _ensure_db()
+
+    if file_hash:
+        session = SessionLocal()
+        try:
+            repo = DocumentRepository(session)
+            existing = repo.find_by_hash(file_hash)
+            if existing is not None:
+                existing_record = _to_record(existing)
+                raise DuplicateError(
+                    f"File '{filename}' is a duplicate of '{existing_record.filename}'",
+                    details={"existing_id": existing.id, "hash": file_hash},
+                )
+        finally:
+            session.close()
 
     if not file_hash:
         from utils import compute_file_hash
 
         file_hash = compute_file_hash(file_path)
 
-    doc_id = _next_id()
-    stat = file_path.stat()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        doc_id = _new_doc_id()
+        stat = file_path.stat()
 
-    record = DocumentRecord(
-        id=doc_id,
-        filename=filename,
-        file_path=file_path,
-        file_size=stat.st_size,
-        mime_type=mime_type,
-        file_hash=file_hash,
-        status=ProcessingStatus.UPLOADED,
-        created_at=time.time(),
-        updated_at=time.time(),
-    )
-    _documents[doc_id] = record
-    logger.info("Registered document %s: %s", doc_id, filename)
-    return record
+        orm_doc = Document(
+            id=doc_id,
+            filename=filename,
+            file_path=str(file_path),
+            file_size=stat.st_size,
+            mime_type=mime_type,
+            file_hash=file_hash,
+            status=ProcessingStatus.UPLOADED.value,
+            created_at=time.time(),
+            updated_at=time.time(),
+        )
+        repo.add(orm_doc)
+        session.commit()
+
+        record = _to_record(orm_doc)
+        logger.info("Registered document %s: %s", doc_id, filename)
+        return record
+    except BaseException:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def get_document(doc_id: str) -> DocumentRecord | None:
     """Retrieve a document by its id."""
-    return _documents.get(doc_id)
+    _ensure_db()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        doc = repo.get(doc_id)
+        return _to_record(doc) if doc else None
+    finally:
+        session.close()
 
 
 def find_by_hash(file_hash: str) -> DocumentRecord | None:
@@ -113,10 +193,14 @@ def find_by_hash(file_hash: str) -> DocumentRecord | None:
     Returns:
         The first matching document, or ``None``.
     """
-    for doc in _documents.values():
-        if doc.file_hash == file_hash:
-            return doc
-    return None
+    _ensure_db()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        doc = repo.find_by_hash(file_hash)
+        return _to_record(doc) if doc else None
+    finally:
+        session.close()
 
 
 def list_documents(
@@ -128,16 +212,27 @@ def list_documents(
 
     Results are sorted by creation time, newest first.
     """
-    records = list(_documents.values())
-    if status is not None:
-        records = [r for r in records if r.status == status]
-    records.sort(key=lambda r: r.created_at, reverse=True)
-    return records[offset : offset + limit]
+    _ensure_db()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        status_str = status.value if status is not None else None
+        docs = repo.list(status=status_str, limit=limit, offset=offset)
+        return [_to_record(d) for d in docs]
+    finally:
+        session.close()
 
 
 def list_by_status(status: ProcessingStatus) -> list[DocumentRecord]:
     """Return all documents with a given status."""
-    return [r for r in _documents.values() if r.status == status]
+    _ensure_db()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        docs = repo.list_by_status(status.value)
+        return [_to_record(d) for d in docs]
+    finally:
+        session.close()
 
 
 def update_status(
@@ -155,36 +250,58 @@ def update_status(
     Returns:
         The updated record, or ``None`` if not found.
     """
-    record = _documents.get(doc_id)
-    if record is None:
-        return None
-    record.status = status
-    record.updated_at = time.time()
-    for key, val in kwargs.items():
-        if hasattr(record, key):
-            setattr(record, key, val)
-    return record
+    _ensure_db()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        if "structured_json" in kwargs:
+            kwargs["structured_json"] = _json_to_db(kwargs["structured_json"])
+        doc = repo.update_status(doc_id, status.value, **kwargs)
+        if doc is None:
+            return None
+        session.commit()
+        return _to_record(doc)
+    except BaseException:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def count_documents() -> int:
     """Total number of registered documents."""
-    return len(_documents)
+    _ensure_db()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        return repo.count()
+    finally:
+        session.close()
 
 
 def search_documents(query: str) -> list[DocumentRecord]:
-    """Simple in-memory text search (replaced by Whoosh / FTS later)."""
-    q = query.lower()
-    results: list[DocumentRecord] = []
-    for doc in _documents.values():
-        if q in doc.filename.lower():
-            results.append(doc)
-            continue
-        if doc.extracted_text and q in doc.extracted_text.lower():
-            results.append(doc)
-    return results
+    """Simple text search across persisted records."""
+    _ensure_db()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        docs = repo.search(query)
+        return [_to_record(d) for d in docs]
+    finally:
+        session.close()
 
 
 def clear_all() -> None:
     """Remove all document records (testing / reset)."""
-    _documents.clear()
-    logger.info("Cleared all document records")
+    _ensure_db()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        repo.clear_all()
+        session.commit()
+        logger.info("Cleared all document records")
+    except BaseException:
+        session.rollback()
+        raise
+    finally:
+        session.close()

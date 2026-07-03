@@ -48,37 +48,37 @@ def init_db() -> None:
 
 
 def _enable_wal() -> None:
-    """Enable WAL mode for better concurrent read/write performance."""
+    """Enable WAL mode for better concurrent read/write performance.
+
+    Falls back to DELETE journal mode when WAL is not supported
+    (e.g. on network filesystems that do not support shared memory).
+    """
     with engine.connect() as conn:
-        conn.execute(text("PRAGMA journal_mode=WAL"))
-        conn.execute(text("PRAGMA synchronous=NORMAL"))
+        conn.execute(text("PRAGMA busy_timeout=5000"))
+        try:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.execute(text("PRAGMA synchronous=NORMAL"))
+        except Exception:
+            conn.execute(text("PRAGMA journal_mode=DELETE"))
         conn.commit()
 
 
 def _init_fts5(engine: object) -> None:
     """Create the FTS5 virtual table for full-text search if it doesn't exist."""
     with SessionLocal() as session:
-        # Check if FTS table already exists
-        result = session.execute(
+        session.execute(
             text(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='virtual_table' AND name='documents_fts'"
+                "CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5("
+                "  document_id UNINDEXED,"
+                "  filename,"
+                "  extracted_text,"
+                "  structured_json,"
+                "  content='documents',"
+                "  content_rowid='rowid'"
+                ")"
             )
         )
-        if result.scalar() is None:
-            session.execute(
-                text(
-                    "CREATE VIRTUAL TABLE documents_fts USING fts5("
-                    "  document_id UNINDEXED,"
-                    "  filename,"
-                    "  extracted_text,"
-                    "  structured_json,"
-                    "  content='documents',"
-                    "  content_rowid='rowid'"
-                    ")"
-                )
-            )
-            session.commit()
+        session.commit()
 
 
 def get_session() -> Session:

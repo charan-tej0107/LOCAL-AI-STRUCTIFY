@@ -6,7 +6,7 @@ import streamlit as st
 
 from config import settings
 from ingestion import IngestionManager
-from services.document_service import DocumentRecord, get_document
+from services.document_service import DocumentRecord, get_document, list_documents
 from services.pipeline_service import process_document
 from ui.components import (
     section_header,
@@ -15,7 +15,7 @@ from ui.components import (
     file_card,
     empty_state,
 )
-from ui.state import UPLOADED_FILES_KEY, PAGE_KEY
+from ui.state import PAGE_KEY
 from utils import human_readable_size, ProcessingStatus, get_logger
 
 logger = get_logger(__name__)
@@ -67,18 +67,9 @@ def render() -> None:
                 if doc:
                     all_records.append(doc)
 
-        if all_records:
-            st.session_state[UPLOADED_FILES_KEY] = [
-                r.id for r in all_records
-            ]
-
-    # On subsequent reruns (e.g. after button clicks), restore records
-    # from session state to avoid losing widgets due to duplicate detection.
-    if not all_records and st.session_state.get(UPLOADED_FILES_KEY):
-        for doc_id in st.session_state[UPLOADED_FILES_KEY]:
-            doc = get_document(doc_id)
-            if doc:
-                all_records.append(doc)
+    # On subsequent reruns or after restart, retrieve from SQLite
+    if not all_records:
+        all_records = list_documents(limit=10)
 
     if not all_records:
         empty_state(
@@ -126,7 +117,7 @@ def render() -> None:
     # ── Batch actions ─────────────────────────────────────────────────
 
     section_header("Batch Actions")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         if st.button("Process All", type="primary", use_container_width=True):
             logger.info("Process All clicked — %d records", len(all_records))
@@ -139,8 +130,4 @@ def render() -> None:
     with col2:
         if st.button("View Results", use_container_width=True):
             st.session_state[PAGE_KEY] = "Results"
-            st.rerun()
-    with col3:
-        if st.button("Clear List", use_container_width=True):
-            st.session_state[UPLOADED_FILES_KEY] = []
             st.rerun()

@@ -1,0 +1,96 @@
+# ── Local AI Structify — Docker Compose ─────────────────────────────────
+# Three services:
+#   1. structify  — Streamlit application
+#   2. ollama     — LLM inference engine
+#   3. nginx      — Reverse proxy with WebSocket support
+# ────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+  # ── Application service ─────────────────────────────────────────────
+  structify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: structify
+    restart: unless-stopped
+
+    # Mount persistent data directories so data survives container restarts
+    volumes:
+      - ./uploads:/app/uploads
+      - ./cache:/app/cache
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+
+    # Environment overrides for the application
+    environment:
+      # Streamlit: bind to all interfaces so nginx can proxy to it
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_HEADLESS=true
+      # Ollama: point to the companion ollama container
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_HOST=http://ollama:11434
+      # Data paths (already the defaults, explicit for clarity)
+      - DATABASE_URL=sqlite:////app/data/local_ai.db
+      - UPLOADS_DIR=/app/uploads
+      - CACHE_DIR=/app/cache
+      - DATA_DIR=/app/data
+      - MODELS_DIR=/app/models
+      - LOGS_DIR=/app/logs
+
+    # Expose Streamlit port internally for nginx
+    expose:
+      - "8501"
+
+    depends_on:
+      ollama:
+        condition: service_started
+
+  # ── Ollama inference engine ─────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: structify-ollama
+    restart: unless-stopped
+
+    # Persist downloaded models in a named volume
+    volumes:
+      - ollama-models:/root/.ollama
+
+    # Expose the Ollama API port
+    expose:
+      - "11434"
+
+    # Health check: confirm the Ollama server is responding
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # ── Nginx reverse proxy ─────────────────────────────────────────────
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: structify-nginx
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+
+    depends_on:
+      - structify
+
+    volumes:
+      # Mount nginx configuration
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+
+# ── Named volumes ─────────────────────────────────────────────────────
+volumes:
+  ollama-models:
+    driver: local

@@ -1,0 +1,67 @@
+# ── Local AI Structify .dockerignore ───────────────────────────────────
+# Exclude everything not needed inside the Docker image.
+
+# Python
+venv/
+.env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+*.pyo
+*.whl
+
+# Version control
+.git/
+.gitattributes
+.gitignore
+.gitlab/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+tests/
+*.pytest_cache
+
+# Project data (persistent — mounted as volumes at runtime)
+uploads/
+cache/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.sqlite
+data/*.sqlite3
+models/
+logs/
+coverage/
+htmlcov/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Environment
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files (not needed inside the image)
+.dockerignore
+Dockerfile
+docker-compose.yml
+nginx/
+scripts/
+
+# Documentation
+README.md
+LICENSE
+docs/

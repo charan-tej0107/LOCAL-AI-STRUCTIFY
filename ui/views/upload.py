@@ -6,7 +6,7 @@ import streamlit as st
 
 from config import settings
 from ingestion import IngestionManager
-from services.document_service import DocumentRecord, get_document, list_documents
+from services.document_service import DocumentRecord, get_document
 from services.pipeline_service import process_document
 from ui.components import (
     section_header,
@@ -15,7 +15,7 @@ from ui.components import (
     file_card,
     empty_state,
 )
-from ui.state import PAGE_KEY
+from ui.state import PAGE_KEY, UPLOADED_FILES_KEY
 from utils import human_readable_size, ProcessingStatus, get_logger
 
 logger = get_logger(__name__)
@@ -44,7 +44,9 @@ def render() -> None:
         accept_multiple_files=True,
     )
 
-    all_records: list[DocumentRecord] = []
+    if UPLOADED_FILES_KEY not in st.session_state:
+        st.session_state[UPLOADED_FILES_KEY] = []
+
     errors: list[str] = []
     duplicates: list[str] = []
 
@@ -65,13 +67,13 @@ def render() -> None:
             if result.doc_id:
                 doc = get_document(result.doc_id)
                 if doc:
-                    all_records.append(doc)
+                    existing_ids = [d.id for d in st.session_state[UPLOADED_FILES_KEY]]
+                    if doc.id not in existing_ids:
+                        st.session_state[UPLOADED_FILES_KEY].append(doc)
 
-    # On subsequent reruns or after restart, retrieve from SQLite
-    if not all_records:
-        all_records = list_documents(limit=10)
+    all_records = list(st.session_state[UPLOADED_FILES_KEY])
 
-    if not all_records:
+    if not all_records and not errors and not duplicates:
         empty_state(
             "📤",
             "Select files to upload",
@@ -89,9 +91,9 @@ def render() -> None:
     for err in errors:
         st.error(err)
 
-    # ── Recently uploaded list ────────────────────────────────────────
+    # ── Upload queue ──────────────────────────────────────────────────
 
-    section_header("Recently Uploaded")
+    section_header("Upload Queue")
     for record in all_records:
         with st.container():
             file_card(
@@ -109,8 +111,15 @@ def render() -> None:
                     type="primary",
                 ):
                     logger.info("Process Now clicked for doc %s (%s)", record.id, record.filename)
+                    logger.info("Calling process_document  module=%s  file=%s",
+                                process_document.__module__,
+                                process_document.__code__.co_filename)
                     with st.spinner(f"Processing {record.filename} …"):
-                        process_document(record)
+                        result = process_document(record)
+                    if result and result.status == ProcessingStatus.STORED:
+                        st.session_state[UPLOADED_FILES_KEY] = [
+                            r for r in st.session_state[UPLOADED_FILES_KEY] if r.id != record.id
+                        ]
                     logger.info("Process Now completed for doc %s", record.id)
                     st.rerun()
 
@@ -121,10 +130,17 @@ def render() -> None:
     with col1:
         if st.button("Process All", type="primary", use_container_width=True):
             logger.info("Process All clicked — %d records", len(all_records))
-            for record in all_records:
+            for record in list(st.session_state[UPLOADED_FILES_KEY]):
                 logger.info("  -> processing doc %s (%s)", record.id, record.filename)
+                logger.info("Calling process_document  module=%s  file=%s",
+                            process_document.__module__,
+                            process_document.__code__.co_filename)
                 with st.spinner(f"Processing {record.filename} …"):
-                    process_document(record)
+                    result = process_document(record)
+                if result and result.status == ProcessingStatus.STORED:
+                    st.session_state[UPLOADED_FILES_KEY] = [
+                        r for r in st.session_state[UPLOADED_FILES_KEY] if r.id != record.id
+                    ]
             logger.info("Process All completed")
             st.rerun()
     with col2:

@@ -99,22 +99,21 @@ class Settings(BaseSettings):
     METADATA_SORT_KEYS: bool = True
     METADATA_STRIP_EMPTY: bool = True
 
-    # ── LLM / AI ──────────────────────────────────────────────────────
+    # ── AI Inference ──────────────────────────────────────────────────
     LLM_PROVIDER: str = "ollama"
 
-    # Ollama model to use
-    OLLAMA_MODEL: str = "llama3.2:latest"
-
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    LLAMA_MODELS_DIR: Path | str = ""
-    LLAMA_CPP_N_THREADS: int = 4
-    LLAMA_CPP_N_GPU_LAYERS: int = 0
+    OLLAMA_API_KEY: str = ""
+    OLLAMA_MODEL: str = "llama3.2:latest"
     LLM_TEMPERATURE: float = 0.1
     LLM_MAX_TOKENS: int = 2048
     LLM_TOP_P: float = 0.9
     LLM_TIMEOUT: int = 120
     LLM_RETRY_ATTEMPTS: int = 3
     LLM_RETRY_DELAY: float = 2.0
+
+    # ── Debugging ──────────────────────────────────────────────────────
+    AI_DEBUG: bool = False
 
     # ── Confidence scoring ────────────────────────────────────────────
     CONFIDENCE_THRESHOLD: float = 0.6
@@ -180,11 +179,6 @@ class Settings(BaseSettings):
 
         # Ensure Whisper model parent directory exists.
         self.WHISPER_MODEL_DIR.parent.mkdir(parents=True, exist_ok=True)
-
-        # Resolve llama.cpp model directory.
-        if not self.LLAMA_MODELS_DIR:
-            object.__setattr__(self, "LLAMA_MODELS_DIR", self.MODELS_DIR / "llama")
-        self.LLAMA_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Single shared instance — import ``settings`` everywhere else.

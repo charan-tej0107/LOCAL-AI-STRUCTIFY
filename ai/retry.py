@@ -10,6 +10,8 @@ from utils import get_logger
 
 logger = get_logger(__name__)
 
+_PERMANENT_HTTP_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 422})
+
 
 class RetryHandler:
     """Wrap a callable with exponential-backoff retry logic.
@@ -66,16 +68,30 @@ class RetryHandler:
                 return fn(*args, **kwargs)
             except Exception as exc:
                 last_exc = exc
+
+                # Do not retry permanent HTTP errors.
+                if _is_permanent(exc):
+                    logger.warning(
+                        "Permanent failure on attempt %d/%d for %s: %s",
+                        attempt,
+                        self.max_attempts,
+                        _name(fn),
+                        exc,
+                    )
+                    raise
+
                 if attempt < self.max_attempts:
+                    retry_after = _parse_retry_after(exc)
+                    actual_delay = retry_after if retry_after is not None else delay
                     logger.warning(
                         "Attempt %d/%d failed for %s: %s. Retrying in %.1fs…",
                         attempt,
                         self.max_attempts,
                         _name(fn),
                         exc,
-                        delay,
+                        actual_delay,
                     )
-                    time.sleep(delay)
+                    time.sleep(actual_delay)
                     delay = min(delay * self.backoff, self.max_delay)
                 else:
                     logger.error(
@@ -93,3 +109,36 @@ class RetryHandler:
 
 def _name(fn: Callable[..., Any]) -> str:
     return getattr(fn, "__name__", str(fn))
+
+
+def _is_permanent(exc: Exception) -> bool:
+    """Check if *exc* indicates a permanent (non-retryable) failure."""
+    try:
+        import httpx
+    except ImportError:
+        return False
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _PERMANENT_HTTP_STATUSES
+    return False
+
+
+def _parse_retry_after(exc: Exception) -> float | None:
+    """Extract ``Retry-After`` header value from an HTTP response.
+
+    Returns the number of seconds to wait, or ``None`` if the header
+    is not present or cannot be parsed.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return None
+
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        value = exc.response.headers.get("Retry-After")
+        if value is not None:
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                pass
+    return None

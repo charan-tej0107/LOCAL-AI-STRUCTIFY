@@ -1,11 +1,7 @@
-"""Model discovery and availability checking.
-
-Supports Ollama (HTTP API) and llama.cpp (local GGUF files).
-"""
+"""Model discovery and availability checking for the Ollama API."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from config import settings
@@ -20,40 +16,33 @@ class ModelNotFoundError(LookupError):
 
 
 class ModelManager:
-    """Discover and validate available AI models.
+    """Discover and validate available AI models via the Ollama API.
 
     Usage::
 
         mgr = ModelManager()
-        all_models = mgr.list_models("ollama")
-        info = mgr.get_model("llama3", "ollama")
+        all_models = mgr.list_models()
+        info = mgr.get_model("llama3")
     """
 
     def list_models(self, provider: str = "") -> list[ModelInfo]:
         """Return all available models for *provider*.
 
         Args:
-            provider: ``"ollama"`` or ``"llama.cpp"``. Defaults to
-                ``settings.LLM_PROVIDER``.
+            provider: Ignored for now — only ``"ollama"`` is supported.
 
         Returns:
-            A list of :class:`ModelInfo`. Empty when the provider is
+            A list of :class:`ModelInfo`. Empty when the API is
             unavailable or has no models.
         """
-        provider = provider or settings.LLM_PROVIDER
-        if provider == "ollama":
-            return self._list_ollama_models()
-        if provider in ("llama.cpp", "llamacpp"):
-            return self._list_llamacpp_models()
-        logger.warning("Unknown provider: %s", provider)
-        return []
+        return self._fetch_ollama_models()
 
     def get_model(self, name: str, provider: str = "") -> ModelInfo:
         """Get metadata for a specific model by name.
 
         Args:
-            name: Model name (e.g. ``"llama3"`` or ``"llama-2-7b.gguf"``).
-            provider: Provider to search in.
+            name: Model name (e.g. ``"llama3"``).
+            provider: Ignored for now.
 
         Returns:
             :class:`ModelInfo` if found.
@@ -61,44 +50,40 @@ class ModelManager:
         Raises:
             ModelNotFoundError: If the model does not exist.
         """
-        provider = provider or settings.LLM_PROVIDER
-        models = self.list_models(provider)
+        models = self.list_models()
         for m in models:
             if m.name == name:
                 return m
-        raise ModelNotFoundError(f"Model '{name}' not found for provider '{provider}'")
+        raise ModelNotFoundError(f"Model '{name}' not found on the API server")
 
     def is_available(self, provider: str = "") -> bool:
-        """Check whether *provider* is reachable / installed.
+        """Check whether the Ollama API endpoint is reachable."""
+        return self._ollama_reachable()
 
-        For Ollama this sends a request to the API endpoint.
-        For llama.cpp this checks if the Python package is importable.
-        """
-        provider = provider or settings.LLM_PROVIDER
-        if provider == "ollama":
-            return self._ollama_reachable()
-        if provider in ("llama.cpp", "llamacpp"):
-            return self._llamacpp_installed()
-        return False
-
-    # ── Ollama ─────────────────────────────────────────────────────────
-
-    def _list_ollama_models(self) -> list[ModelInfo]:
+    def _fetch_ollama_models(self) -> list[ModelInfo]:
         try:
-            return self._fetch_ollama_models()
+            return self._request_ollama_models()
         except Exception as exc:
             logger.debug("Failed to list Ollama models: %s", exc)
             return []
 
-    def _fetch_ollama_models(self) -> list[ModelInfo]:
+    def _request_ollama_models(self) -> list[ModelInfo]:
         try:
             import httpx
         except ImportError:
             return []
 
-        url = f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/tags"
+        api_key = settings.OLLAMA_API_KEY
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        base_url = settings.OLLAMA_BASE_URL.rstrip("/")
+        if base_url.endswith("/api"):
+            base_url = base_url[:-4]
+        url = f"{base_url}/api/tags"
         with httpx.Client(timeout=10) as client:
-            resp = client.get(url)
+            resp = client.get(url, headers=headers)
             resp.raise_for_status()
             data = resp.json()
 
@@ -123,43 +108,18 @@ class ModelManager:
         except ImportError:
             return False
 
+        api_key = settings.OLLAMA_API_KEY
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
         try:
-            url = f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/tags"
+            base_url = settings.OLLAMA_BASE_URL.rstrip("/")
+            if base_url.endswith("/api"):
+                base_url = base_url[:-4]
+            url = f"{base_url}/api/tags"
             with httpx.Client(timeout=5) as client:
-                resp = client.get(url)
+                resp = client.get(url, headers=headers)
                 return resp.is_success
         except Exception:
-            return False
-
-    # ── llama.cpp ──────────────────────────────────────────────────────
-
-    def _list_llamacpp_models(self) -> list[ModelInfo]:
-        models_dir = self._llama_models_dir()
-        if not models_dir.is_dir():
-            return []
-
-        models: list[ModelInfo] = []
-        for fpath in sorted(models_dir.glob("*.gguf")):
-            models.append(
-                ModelInfo(
-                    name=fpath.stem,
-                    provider="llama.cpp",
-                    available=True,
-                    path=str(fpath),
-                    size_bytes=fpath.stat().st_size,
-                )
-            )
-        return models
-
-    def _llama_models_dir(self) -> Path:
-        raw = settings.LLAMA_MODELS_DIR
-        if isinstance(raw, Path):
-            return raw
-        return Path(raw) if raw else settings.MODELS_DIR / "llama"
-
-    def _llamacpp_installed(self) -> bool:
-        try:
-            import llama_cpp  # noqa: F401
-            return True
-        except ImportError:
             return False

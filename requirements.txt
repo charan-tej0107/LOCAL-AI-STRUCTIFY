@@ -26,7 +26,6 @@ sqlalchemy>=2.0.0,<3
 numpy>=1.24.0,<3
 
 # Optional dependencies (install as needed):
-#   llama-cpp-python       — llama.cpp LLM inference backend
 #   openpyxl               — Excel (.xlsx) export support
 #   psutil                 — enhanced system monitoring (CPU/RAM/Disk)
 

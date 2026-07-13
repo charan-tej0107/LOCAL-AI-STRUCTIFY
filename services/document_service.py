@@ -291,6 +291,78 @@ def search_documents(query: str) -> list[DocumentRecord]:
         session.close()
 
 
+def delete_document(doc_id: str) -> bool:
+    """Delete a document and all its associated artifacts.
+
+    Removes the database record (cascading to processing history
+    and document chunks), removes the FTS index entry, and deletes
+    the uploaded file from disk if it still exists.
+
+    Args:
+        doc_id: The document identifier.
+
+    Returns:
+        ``True`` if the document was found and deleted.
+    """
+    _ensure_db()
+    session = SessionLocal()
+    try:
+        repo = DocumentRepository(session)
+        doc = repo.get(doc_id)
+        if doc is None:
+            logger.warning("delete_document: doc %s not found", doc_id)
+            return False
+
+        file_path = Path(doc.file_path) if doc.file_path else None
+
+        from database.search import delete_from_index
+
+        try:
+            delete_from_index(session, doc_id)
+        except Exception:
+            logger.warning(
+                "Could not remove FTS entry for doc %s "
+                "(FTS table may lack document_id column) — skipping",
+                doc_id,
+            )
+
+        session.delete(doc)
+        session.commit()
+
+        if file_path and file_path.exists():
+            try:
+                file_path.unlink()
+                _cleanup_empty_parents(file_path.parent)
+            except OSError as exc:
+                logger.warning("Failed to delete file %s: %s", file_path, exc)
+
+        logger.info("Deleted document %s (%s)", doc_id, doc.filename)
+        return True
+
+    except BaseException:
+        session.rollback()
+        logger.exception("Failed to delete document %s", doc_id)
+        raise
+    finally:
+        session.close()
+
+
+def _cleanup_empty_parents(path: Path) -> None:
+    """Remove empty parent directories up to the uploads root."""
+    try:
+        from config import settings
+
+        uploads_root = settings.UPLOADS_DIR.resolve()
+        current = path.resolve()
+        while current != uploads_root and current != current.parent:
+            if any(current.iterdir()):
+                break
+            current.rmdir()
+            current = current.parent
+    except (OSError, PermissionError):
+        pass
+
+
 def clear_all() -> None:
     """Remove all document records (testing / reset)."""
     _ensure_db()

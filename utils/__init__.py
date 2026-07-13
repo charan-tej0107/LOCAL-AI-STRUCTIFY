@@ -46,7 +46,7 @@ from utils.system_check import (
     CheckResult,
     check_python,
     check_tesseract,
-    check_ollama,
+    check_ollama_api,
     check_ffmpeg,
     check_poppler,
 )
@@ -96,7 +96,7 @@ __all__ = [
     "CheckResult",
     "check_python",
     "check_tesseract",
-    "check_ollama",
+    "check_ollama_api",
     "check_ffmpeg",
     "check_poppler",
 ]

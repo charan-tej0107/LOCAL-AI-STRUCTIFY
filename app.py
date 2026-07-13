@@ -8,10 +8,12 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 from pathlib import Path
 
+from config import settings
 from utils.logger import setup_logging, get_logger
 from utils.system_check import run_all_checks
 
@@ -22,12 +24,15 @@ def run_health_check() -> int:
     Returns:
         0 if all checks pass, 1 otherwise.
     """
-    setup_logging()
+    level = logging.DEBUG if settings.AI_DEBUG else logging.INFO
+    setup_logging(level=level)
     log = get_logger("app")
 
     log.info("=" * 60)
     log.info("  Local AI Structify — environment check")
     log.info("=" * 60)
+    log.info("Ollama config: base_url=%s | model=%s", settings.OLLAMA_BASE_URL, settings.OLLAMA_MODEL)
+    log.log(level, "AI_DEBUG = %s (logging level %s)", settings.AI_DEBUG, logging.getLevelName(level))
 
     health = run_all_checks()
 

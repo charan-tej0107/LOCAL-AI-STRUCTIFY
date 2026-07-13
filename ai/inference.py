@@ -1,4 +1,4 @@
-"""Inference backends — Ollama and llama.cpp.
+"""Inference backend for the Ollama API.
 
 Each backend implements the :class:`BaseInference` ABC with
 ``generate``, ``generate_stream``, ``chat``, and ``chat_stream``.
@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import time
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any, Generator
 
 from config import settings
@@ -19,6 +18,8 @@ from ai.retry import RetryHandler
 from utils import get_logger
 
 logger = get_logger(__name__)
+
+_PERMANENT_HTTP_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 422})
 
 
 class BaseInference(ABC):
@@ -30,8 +31,6 @@ class BaseInference(ABC):
 
     def __init__(self) -> None:
         self._retry = RetryHandler()
-
-    # ── Public API ─────────────────────────────────────────────────────
 
     def generate(self, prompt: str, **kwargs: Any) -> AIResult:
         """Generate a completion for *prompt* (non-streaming)."""
@@ -65,8 +64,6 @@ class BaseInference(ABC):
         """Check whether this backend is usable right now."""
         return True
 
-    # ── Subclass hooks ─────────────────────────────────────────────────
-
     @abstractmethod
     def _generate(self, prompt: str, **kwargs: Any) -> AIResult:
         ...
@@ -88,8 +85,6 @@ class BaseInference(ABC):
         self, messages: list[dict[str, str]], **kwargs: Any
     ) -> Generator[str, None, None]:
         ...
-
-    # ── Helpers ────────────────────────────────────────────────────────
 
     def _stream_wrapper(
         self,
@@ -118,20 +113,27 @@ class BaseInference(ABC):
 
 
 class OllamaInference(BaseInference):
-    """Inference backend for Ollama via its HTTP API."""
+    """Inference backend that communicates with an Ollama-compatible API.
+
+    Supports both local and remote API endpoints.
+    Authentication is handled via an API key sent as a Bearer token.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self._base_url = settings.OLLAMA_BASE_URL.rstrip("/")
+        if self._base_url.endswith("/api"):
+            self._base_url = self._base_url[:-4]
+        self._api_key = settings.OLLAMA_API_KEY
+
+    def _headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
 
     def _model_name(self, kwargs: dict[str, Any]) -> str:
-        """Return the Ollama model name."""
-        return kwargs.get(
-            "model",
-            getattr(settings, "OLLAMA_MODEL", "llama3.2:latest"),
-        )
-
-    # ── Availability ───────────────────────────────────────────────────
+        return kwargs.get("model", settings.OLLAMA_MODEL)
 
     def is_available(self) -> bool:
         try:
@@ -142,12 +144,10 @@ class OllamaInference(BaseInference):
         try:
             url = f"{self._base_url}/api/tags"
             with httpx.Client(timeout=5) as client:
-                resp = client.get(url)
+                resp = client.get(url, headers=self._headers())
                 return resp.is_success
         except Exception:
             return False
-
-    # ── Generate (non-streaming) ───────────────────────────────────────
 
     def _generate(self, prompt: str, **kwargs: Any) -> AIResult:
         try:
@@ -157,14 +157,86 @@ class OllamaInference(BaseInference):
 
         params = self._build_kwargs(kwargs)
         model = self._model_name(kwargs)
+        configured_model = settings.OLLAMA_MODEL
+        if configured_model != model:
+            logger.info("Model override: configured=%s, payload=%s", configured_model, model)
+        else:
+            logger.info("Using configured model: %s", model)
         payload = {"model": model, "prompt": prompt, "stream": False, **params}
         url = f"{self._base_url}/api/generate"
         start = time.perf_counter()
 
-        with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
-            resp = client.post(url, json=payload)
-            resp.raise_for_status()
+        if settings.AI_DEBUG:
+            logger.debug("=== AI_DEBUG: HTTP Request ===")
+            logger.debug("URL: %s", url)
+            logger.debug("Configured model: %s", configured_model)
+            logger.debug("Payload model: %s", model)
+            logger.debug("Full payload:\n%s",
+                         json.dumps({k: v for k, v in payload.items() if k != "prompt"},
+                                    indent=2, default=str))
+            logger.debug("Prompt length: %d chars", len(prompt))
+            logger.debug("Prompt:\n%s", prompt)
+
+        try:
+            with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
+                resp = client.post(url, json=payload, headers=self._headers())
+                resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            body = exc.response.text[:2000]
+            if status == 404:
+                logger.error(
+                    "Ollama API returned 404 for model '%s'. "
+                    "Response: %s. Check that OLLAMA_MODEL=%s is available "
+                    "on the server at %s.",
+                    model, body, configured_model, self._base_url,
+                )
+            if settings.AI_DEBUG:
+                logger.debug("=== AI_DEBUG: HTTP Error ===")
+                logger.debug("Status: %d", status)
+                logger.debug("Response body: %s", body)
+            if status in _PERMANENT_HTTP_STATUSES:
+                return _http_error_result(status, _error_detail(exc.response), model)
+            raise
+        except json.JSONDecodeError:
+            if settings.AI_DEBUG:
+                logger.debug("=== AI_DEBUG: JSON Decode FAILED ===")
+            return AIResult(
+                success=False,
+                error="Received malformed JSON response from API",
+                model_used=model,
+            )
+
+        api_elapsed = time.perf_counter() - start
+        if settings.AI_DEBUG:
+            logger.debug("=== AI_DEBUG: HTTP Response ===")
+            logger.debug("Status: %d", resp.status_code)
+            safe_headers = {k: v for k, v in resp.headers.items()
+                            if k.lower() not in ("authorization", "set-cookie")}
+            logger.debug("Headers: %s", safe_headers)
+            logger.debug("Response size: %d bytes", len(resp.content))
+            logger.debug("Raw body (first 5000 chars):\n%s", resp.text[:5000])
+            if len(resp.text) > 5000:
+                logger.debug("Raw body (last 2000 chars):\n%s", resp.text[-2000:])
+            logger.debug("API request time: %.3fs", api_elapsed)
+
+        try:
             data = resp.json()
+        except json.JSONDecodeError:
+            if settings.AI_DEBUG:
+                logger.debug("=== AI_DEBUG: JSON Decode FAILED ===")
+            return AIResult(
+                success=False,
+                error="Received malformed JSON response from API",
+                model_used=model,
+            )
+
+        if settings.AI_DEBUG:
+            logger.debug("=== AI_DEBUG: JSON Decode ===")
+            logger.debug("Response keys: %s", list(data.keys()))
+            logger.debug("'response' field length: %d", len(data.get("response", "")))
+            logger.debug("Tokens in: %s, Tokens out: %s",
+                         data.get("prompt_eval_count"), data.get("eval_count"))
 
         elapsed = time.perf_counter() - start
         return AIResult(
@@ -189,23 +261,28 @@ class OllamaInference(BaseInference):
         payload = {"model": model, "prompt": prompt, "stream": True, **params}
         url = f"{self._base_url}/api/generate"
 
-        with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
-            with client.stream("POST", url, json=payload) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    token = chunk.get("response", "")
-                    if token:
-                        yield token
-                    if chunk.get("done", False):
-                        break
-
-    # ── Chat ───────────────────────────────────────────────────────────
+        try:
+            with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
+                with client.stream("POST", url, json=payload, headers=self._headers()) as resp:
+                    resp.raise_for_status()
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        token = chunk.get("response", "")
+                        if token:
+                            yield token
+                        if chunk.get("done", False):
+                            break
+        except httpx.HTTPStatusError as exc:
+            logger.error("Stream HTTP error %s: %s", exc.response.status_code, _error_detail(exc.response))
+        except httpx.TimeoutException:
+            logger.error("Stream timed out after %ss", settings.LLM_TIMEOUT)
+        except httpx.ConnectError:
+            logger.error("Stream connection error to %s", self._base_url)
 
     def _chat(self, messages: list[dict[str, str]], **kwargs: Any) -> AIResult:
         try:
@@ -215,14 +292,89 @@ class OllamaInference(BaseInference):
 
         params = self._build_kwargs(kwargs)
         model = self._model_name(kwargs)
+        configured_model = settings.OLLAMA_MODEL
+        if configured_model != model:
+            logger.info("Chat model override: configured=%s, payload=%s", configured_model, model)
+        else:
+            logger.info("Chat using configured model: %s", model)
         payload = {"model": model, "messages": messages, "stream": False, **params}
         url = f"{self._base_url}/api/chat"
         start = time.perf_counter()
 
-        with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
-            resp = client.post(url, json=payload)
-            resp.raise_for_status()
+        if settings.AI_DEBUG:
+            logger.debug("=== AI_DEBUG: Chat HTTP Request ===")
+            logger.debug("URL: %s", url)
+            logger.debug("Configured model: %s", configured_model)
+            logger.debug("Payload model: %s", model)
+            logger.debug("Temperature: %s", params.get("temperature"))
+            logger.debug("Max tokens: %s", params.get("max_tokens"))
+            logger.debug("Timeout: %s", settings.LLM_TIMEOUT)
+            logger.debug("Messages count: %d", len(messages))
+            if messages:
+                logger.debug("First message role=%s, content_len=%d",
+                             messages[0].get("role"), len(messages[0].get("content", "")))
+
+        try:
+            with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
+                resp = client.post(url, json=payload, headers=self._headers())
+                resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            body = exc.response.text[:2000]
+            if status == 404:
+                logger.error(
+                    "Ollama API returned 404 for model '%s' in chat. "
+                    "Response: %s. Check that OLLAMA_MODEL=%s is available "
+                    "on the server at %s.",
+                    model, body, configured_model, self._base_url,
+                )
+            if settings.AI_DEBUG:
+                logger.debug("=== AI_DEBUG: Chat HTTP Error ===")
+                logger.debug("Status: %d", status)
+                logger.debug("Response body: %s", body)
+            if status in _PERMANENT_HTTP_STATUSES:
+                return _http_error_result(status, _error_detail(exc.response), model)
+            raise
+        except json.JSONDecodeError:
+            if settings.AI_DEBUG:
+                logger.debug("=== AI_DEBUG: Chat JSON Decode FAILED ===")
+            return AIResult(
+                success=False,
+                error="Received malformed JSON response from API",
+                model_used=model,
+            )
+
+        if settings.AI_DEBUG:
+            logger.debug("=== AI_DEBUG: Chat HTTP Response ===")
+            logger.debug("Status: %d", resp.status_code)
+            safe_headers = {k: v for k, v in resp.headers.items()
+                            if k.lower() not in ("authorization", "set-cookie")}
+            logger.debug("Headers: %s", safe_headers)
+            logger.debug("Response size: %d bytes", len(resp.content))
+            logger.debug("Raw body (first 5000 chars):\n%s", resp.text[:5000])
+            if len(resp.text) > 5000:
+                logger.debug("Raw body (last 2000 chars):\n%s", resp.text[-2000:])
+
+        try:
             data = resp.json()
+        except json.JSONDecodeError:
+            if settings.AI_DEBUG:
+                logger.debug("=== AI_DEBUG: Chat JSON Decode FAILED ===")
+            return AIResult(
+                success=False,
+                error="Received malformed JSON response from API",
+                model_used=model,
+            )
+
+        if settings.AI_DEBUG:
+            logger.debug("=== AI_DEBUG: Chat JSON Decode ===")
+            logger.debug("Response keys: %s", list(data.keys()))
+            msg = data.get("message", {})
+            logger.debug("Message role: %s, content length: %d",
+                         msg.get("role"), len(msg.get("content", "")))
+            logger.debug("Tokens in: %s, Tokens out: %s",
+                         data.get("prompt_eval_count"), data.get("eval_count"))
+            logger.debug("Chat API request time: %.3fs", time.perf_counter() - start)
 
         elapsed = time.perf_counter() - start
         msg = data.get("message", {})
@@ -248,172 +400,53 @@ class OllamaInference(BaseInference):
         payload = {"model": model, "messages": messages, "stream": True, **params}
         url = f"{self._base_url}/api/chat"
 
-        with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
-            with client.stream("POST", url, json=payload) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    delta = chunk.get("message", {})
-                    token = delta.get("content", "")
-                    if token:
-                        yield token
-                    if chunk.get("done", False):
-                        break
-
-
-class LlamaCppInference(BaseInference):
-    """Inference backend for llama.cpp via ``llama-cpp-python``.
-
-    Loads a single GGUF model file.  Use :meth:`is_available` to
-    check that both the package and a model file exist.
-    """
-
-    def __init__(self, model_path: str = "") -> None:
-        super().__init__()
-        self._model_path = model_path
-        self._llama: Any = None
-
-    # ── Availability ───────────────────────────────────────────────────
-
-    def is_available(self) -> bool:
         try:
-            import llama_cpp  # noqa: F401
-        except ImportError:
-            return False
-        if self._model_path:
-            return Path(self._model_path).is_file()
-        models_dir = self._resolve_models_dir()
-        return any(models_dir.glob("*.gguf"))
+            with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
+                with client.stream("POST", url, json=payload, headers=self._headers()) as resp:
+                    resp.raise_for_status()
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        delta = chunk.get("message", {})
+                        token = delta.get("content", "")
+                        if token:
+                            yield token
+                        if chunk.get("done", False):
+                            break
+        except httpx.HTTPStatusError as exc:
+            logger.error("Chat stream HTTP error %s: %s", exc.response.status_code, _error_detail(exc.response))
+        except httpx.TimeoutException:
+            logger.error("Chat stream timed out after %ss", settings.LLM_TIMEOUT)
+        except httpx.ConnectError:
+            logger.error("Chat stream connection error to %s", self._base_url)
 
-    # ── Generate ───────────────────────────────────────────────────────
 
-    def _load_model(self) -> Any:
-        if self._llama is not None:
-            return self._llama
-        if not self._model_path:
-            self._model_path = self._find_first_gguf()
-        if not self._model_path:
-            raise FileNotFoundError(
-                "No llama.cpp model found — place a .gguf file in the models directory"
-            )
-        try:
-            import llama_cpp
-        except ImportError:
-            raise RuntimeError("llama-cpp-python is not installed. Run: pip install llama-cpp-python")
+def _error_detail(response: Any) -> str:
+    """Extract a human-readable error detail from an HTTP response."""
+    try:
+        body = response.json()
+        return body.get("error", body.get("message", str(response.reason_phrase)))
+    except Exception:
+        return str(response.reason_phrase)
 
-        self._llama = llama_cpp.Llama(
-            model_path=self._model_path,
-            n_threads=settings.LLAMA_CPP_N_THREADS,
-            n_gpu_layers=settings.LLAMA_CPP_N_GPU_LAYERS,
-            verbose=False,
-        )
-        return self._llama
 
-    def _generate(self, prompt: str, **kwargs: Any) -> AIResult:
-        llm = self._load_model()
-        params = self._build_kwargs(kwargs)
-        start = time.perf_counter()
-        output = llm.create_completion(
-            prompt,
-            max_tokens=params["max_tokens"],
-            temperature=params["temperature"],
-            top_p=params["top_p"],
-            stop=kwargs.get("stop", []),
-            stream=False,
-        )
-        elapsed = time.perf_counter() - start
-        choice = output.get("choices", [{}])[0]
-        return AIResult(
-            success=True,
-            text=choice.get("text", ""),
-            model_used=Path(self._model_path).stem if self._model_path else "",
-            tokens_in=output.get("usage", {}).get("prompt_tokens", 0),
-            tokens_out=output.get("usage", {}).get("completion_tokens", 0),
-            processing_time_seconds=round(elapsed, 3),
-        )
+def _http_error_result(status: int, detail: str, model: str) -> AIResult:
+    """Build an :class:`AIResult` for an HTTP error response."""
+    if status == 401:
+        msg = "Invalid API key. Check OLLAMA_API_KEY."
+    elif status == 403:
+        msg = "Access denied. Check API permissions."
+    elif status == 404:
+        msg = f"Model '{model}' not found at the API endpoint."
+    elif status == 429:
+        msg = "Rate limit exceeded. Try again later."
+    elif 500 <= status < 600:
+        msg = f"Ollama API server error (HTTP {status})."
+    else:
+        msg = f"HTTP {status}: {detail}"
 
-    def _generate_stream(
-        self, prompt: str, **kwargs: Any
-    ) -> Generator[str, None, None]:
-        llm = self._load_model()
-        params = self._build_kwargs(kwargs)
-        for output in llm.create_completion(
-            prompt,
-            max_tokens=params["max_tokens"],
-            temperature=params["temperature"],
-            top_p=params["top_p"],
-            stop=kwargs.get("stop", []),
-            stream=True,
-        ):
-            choice = output.get("choices", [{}])[0]
-            token = choice.get("text", "")
-            if token:
-                yield token
-
-    # ── Chat ───────────────────────────────────────────────────────────
-
-    def _chat(self, messages: list[dict[str, str]], **kwargs: Any) -> AIResult:
-        llm = self._load_model()
-        params = self._build_kwargs(kwargs)
-        start = time.perf_counter()
-        output = llm.create_chat_completion(
-            messages,
-            max_tokens=params["max_tokens"],
-            temperature=params["temperature"],
-            top_p=params["top_p"],
-            stop=kwargs.get("stop", []),
-            stream=False,
-        )
-        elapsed = time.perf_counter() - start
-        choice = output.get("choices", [{}])[0]
-        msg = choice.get("message", {})
-        return AIResult(
-            success=True,
-            text=msg.get("content", ""),
-            model_used=Path(self._model_path).stem if self._model_path else "",
-            tokens_in=output.get("usage", {}).get("prompt_tokens", 0),
-            tokens_out=output.get("usage", {}).get("completion_tokens", 0),
-            processing_time_seconds=round(elapsed, 3),
-        )
-
-    def _chat_stream(
-        self, messages: list[dict[str, str]], **kwargs: Any
-    ) -> Generator[str, None, None]:
-        llm = self._load_model()
-        params = self._build_kwargs(kwargs)
-        for output in llm.create_chat_completion(
-            messages,
-            max_tokens=params["max_tokens"],
-            temperature=params["temperature"],
-            top_p=params["top_p"],
-            stop=kwargs.get("stop", []),
-            stream=True,
-        ):
-            choice = output.get("choices", [{}])[0]
-            delta = choice.get("delta", {})
-            token = delta.get("content", "")
-            if token:
-                yield token
-
-    # ── Helpers ────────────────────────────────────────────────────────
-
-    def _resolve_models_dir(self) -> Path:
-        raw = settings.LLAMA_MODELS_DIR
-        if isinstance(raw, Path):
-            return raw
-        return Path(raw) if raw else settings.MODELS_DIR / "llama"
-
-    def _find_first_gguf(self) -> str:
-        models_dir = self._resolve_models_dir()
-        files = sorted(models_dir.glob("*.gguf"))
-        return str(files[0]) if files else ""
-
-    def set_model(self, model_path: str) -> None:
-        """Set a specific GGUF model file path."""
-        self._model_path = model_path
-        self._llama = None
+    return AIResult(success=False, error=msg, model_used=model)

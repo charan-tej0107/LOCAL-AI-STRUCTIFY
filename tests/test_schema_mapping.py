@@ -15,12 +15,7 @@ from schema_mapping import (
     FieldConfidence,
     ExtractionResult,
     SchemaFactory,
-    InvoiceSchema,
-    ResumeSchema,
-    ReceiptSchema,
-    PrescriptionSchema,
-    MeetingNotesSchema,
-    ContractSchema,
+    CustomSchema,
     validate_extraction,
     calculate_confidence,
     try_parse_json,
@@ -65,7 +60,7 @@ class TestExtractionResult:
     def test_success(self) -> None:
         r = ExtractionResult(
             success=True,
-            schema_type=SchemaType.INVOICE,
+            schema_type=SchemaType.CUSTOM,
             data={"total": 100.0},
             confidence=0.9,
         )
@@ -79,60 +74,15 @@ class TestExtractionResult:
 # =========================================================================
 
 
-class TestSchemas:
-    def test_invoice_defaults(self) -> None:
-        s = InvoiceSchema()
-        assert s.invoice_number == ""
-        assert s.line_items == []
-        assert s.total == 0.0
+class TestCustomSchema:
+    def test_accepts_any_fields(self) -> None:
+        s = CustomSchema(name="John", age=30)
+        assert s.name == "John"
+        assert s.age == 30
 
-    def test_invoice_with_data(self) -> None:
-        s = InvoiceSchema(
-            invoice_number="INV-001",
-            total=250.0,
-            line_items=[{"description": "Widget", "quantity": 2, "unit_price": 100, "total": 200}],
-        )
-        assert s.invoice_number == "INV-001"
-        assert s.total == 250.0
-        assert len(s.line_items) == 1
-
-    def test_resume_defaults(self) -> None:
-        s = ResumeSchema()
-        assert s.full_name == ""
-        assert s.skills == []
-
-    def test_resume_with_data(self) -> None:
-        s = ResumeSchema(
-            full_name="John Doe",
-            email="john@example.com",
-            skills=["Python", "SQL"],
-        )
-        assert s.full_name == "John Doe"
-        assert len(s.skills) == 2
-
-    def test_receipt_defaults(self) -> None:
-        s = ReceiptSchema()
-        assert s.store_name == ""
-
-    def test_prescription_defaults(self) -> None:
-        s = PrescriptionSchema()
-        assert s.refills == 0
-
-    def test_meeting_notes_defaults(self) -> None:
-        s = MeetingNotesSchema()
-        assert s.attendees == []
-
-    def test_contract_defaults(self) -> None:
-        s = ContractSchema()
-        assert s.parties == []
-
-    def test_contract_with_data(self) -> None:
-        s = ContractSchema(
-            contract_title="Service Agreement",
-            parties=[{"name": "Acme Corp", "role": "Client"}],
-        )
-        assert s.contract_title == "Service Agreement"
-        assert s.parties[0].name == "Acme Corp"
+    def test_default_empty_extra(self) -> None:
+        s = CustomSchema()
+        assert len(s.model_extra or {}) == 0
 
 
 # =========================================================================
@@ -143,8 +93,8 @@ class TestSchemas:
 class TestSchemaFactory:
     def test_get_class(self) -> None:
         factory = SchemaFactory()
-        assert factory.get_class("invoice") is InvoiceSchema
-        assert factory.get_class(SchemaType.RESUME) is ResumeSchema
+        assert factory.get_class("custom") is CustomSchema
+        assert factory.get_class(SchemaType.CUSTOM) is CustomSchema
 
     def test_get_class_unknown(self) -> None:
         factory = SchemaFactory()
@@ -153,17 +103,15 @@ class TestSchemaFactory:
 
     def test_get_field_names(self) -> None:
         factory = SchemaFactory()
-        names = factory.get_field_names("invoice")
-        assert "invoice_number" in names
-        assert "total" in names
+        names = factory.get_field_names("custom")
         assert isinstance(names, list)
+        assert len(names) == 0  # CustomSchema has no predefined fields
 
     def test_get_defaults(self) -> None:
         factory = SchemaFactory()
-        defaults = factory.get_defaults("invoice")
-        assert defaults["invoice_number"] == ""
-        assert defaults["total"] == 0.0
-        assert defaults["line_items"] == []
+        defaults = factory.get_defaults("custom")
+        assert isinstance(defaults, dict)
+        assert len(defaults) == 0  # CustomSchema has no predefined fields
 
     def test_register_custom(self) -> None:
         class MySchema(BaseModel):
@@ -178,9 +126,8 @@ class TestSchemaFactory:
     def test_list_types(self) -> None:
         factory = SchemaFactory()
         types = factory.list_types()
-        assert "invoice" in types
-        assert "contract" in types
-        assert "custom" in types  # Now built-in via CustomSchema
+        assert "custom" in types
+        assert len(types) == 1  # Only CustomSchema is built-in
 
 
 # =========================================================================
@@ -336,17 +283,16 @@ class TestRepairJson:
 
 
 class TestValidateExtraction:
-    def test_valid_invoice(self) -> None:
-        data = {"invoice_number": "INV-001", "total": 100.0}
-        valid, errors = validate_extraction(data, "invoice")
+    def test_custom_schema_accepts_any_data(self) -> None:
+        data = {"any_field": "any_value", "count": 42}
+        valid, errors = validate_extraction(data, "custom")
         assert valid
         assert errors == []
 
-    def test_invalid_type(self) -> None:
-        data = {"total": "not-a-number"}
-        valid, errors = validate_extraction(data, "invoice")
-        assert not valid
-        assert len(errors) > 0
+    def test_empty_data_valid(self) -> None:
+        valid, errors = validate_extraction({}, "custom")
+        assert valid
+        assert errors == []
 
     def test_unknown_schema(self) -> None:
         with pytest.raises(KeyError):
@@ -354,51 +300,27 @@ class TestValidateExtraction:
 
 
 class TestCalculateConfidence:
-    def test_all_populated(self) -> None:
-        data = {
-            "invoice_number": "INV-001",
-            "date": "2024-01-01",
-            "total": 100.0,
-        }
-        score, fields = calculate_confidence(data, "invoice")
-        assert score > 0.0
-        assert len(fields) > 0
-
-    def test_none_populated(self) -> None:
-        data: dict[str, Any] = {}
-        score, fields = calculate_confidence(data, "invoice")
-        assert score <= 0.5  # Optional fields get 0.5
-
-    def test_partial(self) -> None:
-        data = {"invoice_number": "INV-001"}
-        score, fields = calculate_confidence(data, "invoice")
-        assert 0.0 < score < 1.0
-
-    def test_field_confidence_scores(self) -> None:
-        data = {"invoice_number": "INV-001"}
-        score, fields = calculate_confidence(data, "invoice")
-        invoice_field = next(f for f in fields if f.name == "invoice_number")
-        assert invoice_field.populated
-        assert invoice_field.score == 1.0
-        empty_field = next(f for f in fields if f.name == "total")
-        assert not empty_field.populated
-        assert empty_field.score == 0.5  # Optional
+    def test_no_predefined_fields(self) -> None:
+        data = {"any_field": "value1", "another": "value2"}
+        score, fields = calculate_confidence(data, "custom")
+        assert score == 0.0  # CustomSchema has no fields to score
+        assert fields == []
 
 
 class TestEnrichResult:
-    def test_enriches_result(self) -> None:
+    def test_enriches_result_custom(self) -> None:
         from schema_mapping.validator import enrich_result
 
         result = ExtractionResult(
             success=False,
-            schema_type=SchemaType.INVOICE,
+            schema_type=SchemaType.CUSTOM,
         )
-        data = {"invoice_number": "INV-001"}
-        enrich_result(result, data, "invoice")
+        data = {"any_field": "any_value"}
+        enrich_result(result, data, "custom")
         assert result.data == data
-        assert result.confidence > 0.0
-        assert len(result.fields) > 0
-        assert result.success  # Valid
+        assert result.confidence == 0.0  # No predefined fields → score 0
+        assert result.fields == []
+        assert result.success  # CustomSchema accepts everything
 
 
 # =========================================================================
@@ -411,23 +333,23 @@ class TestSchemaExtractor:
         extractor = SchemaExtractor()
         result = extractor.extract(
             text="some invoice text",
-            schema_type=SchemaType.INVOICE,
+            schema_type=SchemaType.CUSTOM,
             raw_json='{"invoice_number": "INV-001", "total": 250.0}',
         )
         assert result.success
         assert result.data["invoice_number"] == "INV-001"
         assert result.data["total"] == 250.0
-        assert result.confidence > 0.0
+        assert result.confidence == 0.0  # CustomSchema has no fields
 
     def test_extract_with_raw_json_stripped_fence(self) -> None:
         extractor = SchemaExtractor()
         result = extractor.extract(
-            text="invoice",
-            schema_type="invoice",
-            raw_json='```json\n{"invoice_number": "INV-002"}\n```',
+            text="data",
+            schema_type="custom",
+            raw_json='```json\n{"id": "DOC-002"}\n```',
         )
         assert result.success
-        assert result.data["invoice_number"] == "INV-002"
+        assert result.data["id"] == "DOC-002"
 
     def test_extract_no_input(self) -> None:
         extractor = SchemaExtractor()
@@ -439,7 +361,7 @@ class TestSchemaExtractor:
         extractor = SchemaExtractor()
         result = extractor.extract(
             text="test",
-            schema_type=SchemaType.INVOICE,
+            schema_type=SchemaType.CUSTOM,
             raw_json="not json",
         )
         assert not result.success
@@ -456,7 +378,7 @@ class TestSchemaExtractor:
         extractor = SchemaExtractor()
         result = extractor.extract(
             text="Invoice #003",
-            schema_type=SchemaType.INVOICE,
+            schema_type=SchemaType.CUSTOM,
             engine=mock_engine,
         )
         assert result.success
@@ -474,7 +396,7 @@ class TestSchemaExtractor:
         extractor = SchemaExtractor()
         result = extractor.extract(
             text="Invoice",
-            schema_type=SchemaType.INVOICE,
+            schema_type=SchemaType.CUSTOM,
             engine=mock_engine,
             raw_json='{"invoice_number": "INV-004"}',
         )
@@ -488,7 +410,7 @@ class TestSchemaExtractor:
         extractor = SchemaExtractor()
         result = extractor.extract(
             text="Invoice",
-            schema_type=SchemaType.INVOICE,
+            schema_type=SchemaType.CUSTOM,
             engine=mock_engine,
             raw_json='{"total": 100.0}',
         )
@@ -510,38 +432,38 @@ class TestSchemaExtractor:
         extractor = SchemaExtractor()
         result = extractor.extract(
             text="test",
-            schema_type="invoice",
-            raw_json="{invoice_number: 'INV-005', total: 400.0,}",
+            schema_type="custom",
+            raw_json="{id: 'DOC-005', amount: 400.0,}",
         )
         assert result.success
-        assert result.data["invoice_number"] == "INV-005"
+        assert result.data["id"] == "DOC-005"
 
     def test_extract_stores_raw_text_and_json(self) -> None:
         extractor = SchemaExtractor()
         result = extractor.extract(
             text="raw doc text",
-            schema_type=SchemaType.INVOICE,
+            schema_type=SchemaType.CUSTOM,
             raw_json='{"total": 50.0}',
         )
         assert result.raw_text == "raw doc text"
         assert result.raw_json == '{"total": 50.0}'
 
-    def test_extract_resume(self) -> None:
+    def test_extract_custom_with_fields(self) -> None:
         extractor = SchemaExtractor()
         result = extractor.extract(
-            text="resume text",
-            schema_type=SchemaType.RESUME,
-            raw_json='{"full_name": "Jane Doe", "skills": ["Python"]}',
+            text="some data",
+            schema_type=SchemaType.CUSTOM,
+            raw_json='{"name": "Jane Doe", "tags": ["Python"]}',
         )
         assert result.success
-        assert result.data["full_name"] == "Jane Doe"
-        assert result.schema_type == SchemaType.RESUME
+        assert result.data["name"] == "Jane Doe"
+        assert result.schema_type == SchemaType.CUSTOM
 
     def test_extract_processing_time(self) -> None:
         extractor = SchemaExtractor()
         result = extractor.extract(
             text="test",
-            schema_type="invoice",
+            schema_type="custom",
             raw_json='{"a": 1}',
         )
         assert isinstance(result.processing_time_seconds, float)
@@ -552,33 +474,21 @@ class TestSchemaExtractor:
         extractor = SchemaExtractor()
         result = extractor.extract(
             text="test",
-            schema_type="invoice",
+            schema_type="custom",
             raw_json='{"valid": true}',
         )
         assert result.success
 
 
 class TestPromptTemplates:
-    def test_invoice_prompt_contains_fields(self) -> None:
+    def test_custom_prompt_document_analysis(self) -> None:
         from schema_mapping.prompt_templates import get_prompt
 
-        prompt = get_prompt("invoice", "some text")
-        assert "invoice_number" in prompt
-        assert "line_items" in prompt
-        assert "some text" in prompt
-
-    def test_resume_prompt_contains_fields(self) -> None:
-        from schema_mapping.prompt_templates import get_prompt
-
-        prompt = get_prompt(SchemaType.RESUME, "resume text")
-        assert "full_name" in prompt
-        assert "experience" in prompt
-
-    def test_custom_prompt_with_field_list(self) -> None:
-        from schema_mapping.prompt_templates import get_prompt
-
-        prompt = get_prompt("custom", "data", field_list="name, age, email")
-        assert "name, age, email" in prompt
+        prompt = get_prompt("custom", "data")
+        assert "document_type" in prompt
+        assert "extracted_data" in prompt
+        assert "NEVER include the full document text" in prompt
+        assert "Return ONLY valid JSON" in prompt
 
     def test_unknown_schema_raises(self) -> None:
         from schema_mapping.prompt_templates import get_prompt
@@ -590,33 +500,11 @@ class TestPromptTemplates:
         from schema_mapping.prompt_templates import list_supported_types
 
         types = list_supported_types()
-        assert "invoice" in types
-        assert "resume" in types
-        assert "receipt" in types
-        assert "prescription" in types
-        assert "meeting_notes" in types
-        assert "contract" in types
         assert "custom" in types
+        assert len(types) == 1
 
 
 class TestSchemaImportExports:
-    def test_all_schemas_exported(self) -> None:
-        from schema_mapping import (
-            InvoiceSchema,
-            ResumeSchema,
-            ReceiptSchema,
-            PrescriptionSchema,
-            MeetingNotesSchema,
-            ContractSchema,
-        )
-
-        assert InvoiceSchema is not None
-        assert ResumeSchema is not None
-        assert ReceiptSchema is not None
-        assert PrescriptionSchema is not None
-        assert MeetingNotesSchema is not None
-        assert ContractSchema is not None
-
     def test_core_exports(self) -> None:
         from schema_mapping import (
             SchemaExtractor,

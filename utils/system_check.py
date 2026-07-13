@@ -1,7 +1,7 @@
 """Environment and system-dependency health checks.
 
-Verifies that required tools (Tesseract, Ollama, FFmpeg, Poppler) are
-installed, that the Python version is sufficient, and that core Python
+Verifies that required tools (Tesseract, Ollama API, FFmpeg, Poppler) are
+available, that the Python version is sufficient, and that core Python
 packages are importable.
 """
 
@@ -42,7 +42,7 @@ class SystemHealth:
 
     python: CheckResult
     tesseract: CheckResult
-    ollama: CheckResult
+    ollama_api: CheckResult
     ffmpeg: CheckResult
     poppler: CheckResult
     disk: CheckResult
@@ -53,7 +53,7 @@ class SystemHealth:
         checks: list[CheckResult] = [
             self.python,
             self.tesseract,
-            self.ollama,
+            self.ollama_api,
             self.ffmpeg,
             self.poppler,
             self.disk,
@@ -72,7 +72,7 @@ class SystemHealth:
         return [
             self.python,
             self.tesseract,
-            self.ollama,
+            self.ollama_api,
             self.ffmpeg,
             self.poppler,
             self.disk,
@@ -148,28 +148,120 @@ def check_tesseract() -> CheckResult:
     )
 
 
-def check_ollama() -> CheckResult:
-    """Verify the Ollama CLI is installed."""
-    exe = _executable_path("ollama")
-    if not exe:
+def check_ollama_api() -> CheckResult:
+    """Verify the Ollama API endpoint is reachable.
+
+    Tests the configured ``OLLAMA_BASE_URL`` with the optional
+    ``OLLAMA_API_KEY``.  This replaces the earlier check that required
+    a local Ollama CLI binary.
+    """
+    from config import settings
+
+    base_url = settings.OLLAMA_BASE_URL.rstrip("/")
+    if base_url.endswith("/api"):
+        base_url = base_url[:-4]
+    api_key = settings.OLLAMA_API_KEY
+    model = settings.OLLAMA_MODEL
+
+    try:
+        import httpx
+    except ImportError:
         return CheckResult(
-            name="Ollama",
+            name="Ollama API",
             passed=False,
-            message="not found on PATH",
+            message="httpx is not installed",
         )
-    ok, output = _run_command(["ollama", "--version"])
-    if ok:
+
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        url = f"{base_url}/api/tags"
+        method = "GET"
+        if settings.AI_DEBUG:
+            logger.debug("=== AI_DEBUG: Ollama Health Check ===")
+            logger.debug("Method: %s", method)
+            logger.debug("URL: %s", url)
+            safe_headers = {k: v for k, v in headers.items()
+                            if k.lower() != "authorization"}
+            logger.debug("Headers: %s", safe_headers)
+
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(url, headers=headers)
+
+        if settings.AI_DEBUG:
+            logger.debug("Status: %d", resp.status_code)
+            logger.debug("Response body:\n%s", resp.text[:2000])
+
+        if resp.is_success:
+            data = resp.json()
+            models = [m.get("name", "") for m in data.get("models", [])]
+            model_available = model in models if model else True
+            if not model_available:
+                return CheckResult(
+                    name="Ollama API",
+                    passed=True,
+                    message=f"reachable at {base_url} but model '{model}' not found",
+                    details={
+                        "url": base_url,
+                        "model": model,
+                        "available_models": models,
+                    },
+                )
+            return CheckResult(
+                name="Ollama API",
+                passed=True,
+                message=f"reachable at {base_url}",
+                details={
+                    "url": base_url,
+                    "model_configured": model,
+                    "models_available": len(models),
+                },
+            )
+
+        if resp.status_code == 401:
+            return CheckResult(
+                name="Ollama API",
+                passed=False,
+                message="authentication failed — check OLLAMA_API_KEY",
+                details={"url": base_url, "status": 401},
+            )
+        if resp.status_code == 403:
+            return CheckResult(
+                name="Ollama API",
+                passed=False,
+                message="access denied — check API permissions",
+                details={"url": base_url, "status": 403},
+            )
         return CheckResult(
-            name="Ollama",
-            passed=True,
-            message=output.strip() or "installed",
-            details={"path": str(exe), "version": output.strip()},
+            name="Ollama API",
+            passed=False,
+            message=f"HTTP {resp.status_code}",
+            details={"url": base_url, "status": resp.status_code},
         )
-    return CheckResult(
-        name="Ollama",
-        passed=False,
-        message=f"found but failed: {output}",
-    )
+
+    except httpx.ConnectError:
+        return CheckResult(
+            name="Ollama API",
+            passed=False,
+            message=f"cannot connect to {base_url}",
+            details={"url": base_url},
+        )
+    except httpx.TimeoutException:
+        return CheckResult(
+            name="Ollama API",
+            passed=False,
+            message=f"timed out connecting to {base_url}",
+            details={"url": base_url},
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="Ollama API",
+            passed=False,
+            message=str(exc),
+            details={"url": base_url},
+        )
 
 
 def check_ffmpeg() -> CheckResult:
@@ -292,7 +384,7 @@ def run_all_checks(
     health = SystemHealth(
         python=check_python(),
         tesseract=check_tesseract(),
-        ollama=check_ollama(),
+        ollama_api=check_ollama_api(),
         ffmpeg=check_ffmpeg(),
         poppler=check_poppler(),
         disk=check_disk_space() if check_disk else CheckResult("Disk Space", True, "skipped"),

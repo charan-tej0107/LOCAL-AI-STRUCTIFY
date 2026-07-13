@@ -15,15 +15,7 @@ Usage::
 """
 
 from schema_mapping.models import SchemaType, FieldConfidence, ExtractionResult
-from schema_mapping.schemas import (
-    InvoiceSchema,
-    ResumeSchema,
-    ReceiptSchema,
-    PrescriptionSchema,
-    MeetingNotesSchema,
-    ContractSchema,
-    CustomSchema,
-)
+from schema_mapping.schemas import CustomSchema
 from schema_mapping.factory import SchemaFactory
 from schema_mapping.validator import validate_extraction, calculate_confidence
 from schema_mapping.repair import try_parse_json, repair_json
@@ -35,12 +27,6 @@ __all__ = [
     "FieldConfidence",
     "ExtractionResult",
     "SchemaFactory",
-    "InvoiceSchema",
-    "ResumeSchema",
-    "ReceiptSchema",
-    "PrescriptionSchema",
-    "MeetingNotesSchema",
-    "ContractSchema",
     "CustomSchema",
     "validate_extraction",
     "calculate_confidence",

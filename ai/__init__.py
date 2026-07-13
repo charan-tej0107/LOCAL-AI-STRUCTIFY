@@ -11,7 +11,7 @@ Usage::
 """
 
 from ai.factory import create_inference
-from ai.inference import BaseInference, OllamaInference, LlamaCppInference
+from ai.inference import BaseInference, OllamaInference
 from ai.models import (
     AIResult,
     ModelInfo,
@@ -31,7 +31,6 @@ __all__ = [
     "create_inference",
     "BaseInference",
     "OllamaInference",
-    "LlamaCppInference",
     "AIResult",
     "ModelInfo",
     "Message",

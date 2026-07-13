@@ -7,7 +7,11 @@ from datetime import datetime
 import streamlit as st
 
 from config import settings
-from services.document_service import list_documents, get_document
+from services.document_service import (
+    list_documents,
+    get_document,
+    delete_document,
+)
 from ui.components import (
     section_header,
     status_badge,
@@ -17,6 +21,10 @@ from ui.components import (
 )
 from utils import human_readable_size
 from ui.state import PAGE_KEY
+
+
+_CONFIRM_KEY = "history_delete_confirm_id"
+_MSG_KEY = "history_delete_msg"
 
 
 def _format_confidence(score: float | None) -> str:
@@ -29,6 +37,47 @@ def _page_key() -> str:
 
 def render() -> None:
     """Render the history page."""
+    # ── Delete confirmation prompt ────────────────────────────────────
+
+    confirm_id = st.session_state.get(_CONFIRM_KEY)
+    if confirm_id:
+        doc = get_document(confirm_id)
+        if doc:
+            st.warning(
+                f"Are you sure you want to permanently delete "
+                f"**{doc.filename}**?"
+            )
+            col_c, col_x = st.columns([1, 1])
+            with col_c:
+                if st.button(
+                    "🗑️ Yes, Delete", type="primary", key="confirm_del_yes"
+                ):
+                    success = delete_document(confirm_id)
+                    st.session_state.pop(_CONFIRM_KEY, None)
+                    st.session_state[_MSG_KEY] = (
+                        "success" if success else "error",
+                        f"Deleted **{doc.filename}**."
+                        if success
+                        else f"Failed to delete **{doc.filename}**.",
+                    )
+                    st.rerun()
+            with col_x:
+                if st.button("Cancel", key="confirm_del_no"):
+                    st.session_state.pop(_CONFIRM_KEY, None)
+                    st.rerun()
+
+    # ── Render success / error message once ───────────────────────────
+
+    msg = st.session_state.pop(_MSG_KEY, None)
+    if msg:
+        kind, text = msg
+        if kind == "success":
+            st.success(text)
+        else:
+            st.error(text)
+
+    # ── Page content ──────────────────────────────────────────────────
+
     section_header("Processing History")
 
     page_size = settings.UI_PAGE_SIZE
@@ -57,7 +106,7 @@ def render() -> None:
 
     for doc in page_docs:
         with st.container():
-            cols = st.columns([3, 1, 1, 1, 1])
+            cols = st.columns([3, 1, 1, 1, 1, 1])
             with cols[0]:
                 file_card(
                     "📄",
@@ -76,6 +125,14 @@ def render() -> None:
                 if st.button("View", key=f"hist_view_{doc.id}"):
                     st.session_state.selected_doc_id = doc.id
                     st.session_state[PAGE_KEY] = "Results"
+                    st.rerun()
+            with cols[5]:
+                if st.button(
+                    "🗑️",
+                    key=f"hist_del_{doc.id}",
+                    help=f"Delete {doc.filename}",
+                ):
+                    st.session_state[_CONFIRM_KEY] = doc.id
                     st.rerun()
         st.divider()
 

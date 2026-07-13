@@ -1,4 +1,4 @@
-"""Unit tests for Module 8: Local AI Engine."""
+"""Unit tests for AI inference module (Ollama API)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ from ai import (
     create_inference,
     BaseInference,
     OllamaInference,
-    LlamaCppInference,
 )
 
 
@@ -358,29 +357,6 @@ class TestModelManager:
 
         assert models == []
 
-    def test_llamacpp_list_models(self, tmp_path: Path) -> None:
-        models_dir = tmp_path / "llama"
-        models_dir.mkdir()
-        (models_dir / "llama-2-7b.Q4_K_M.gguf").write_bytes(b"fake")
-        (models_dir / "mistral-7b.Q4_K_M.gguf").write_bytes(b"fake")
-
-        mgr = ModelManager()
-        with patch.object(mgr, "_llama_models_dir", return_value=models_dir):
-            models = mgr.list_models("llama.cpp")
-
-        assert len(models) == 2
-        names = {m.name for m in models}
-        assert "llama-2-7b.Q4_K_M" in names
-        assert "mistral-7b.Q4_K_M" in names
-
-    def test_llamacpp_list_models_empty_dir(self, tmp_path: Path) -> None:
-        empty_dir = tmp_path / "empty"
-        empty_dir.mkdir()
-        mgr = ModelManager()
-        with patch.object(mgr, "_llama_models_dir", return_value=empty_dir):
-            models = mgr.list_models("llama.cpp")
-        assert models == []
-
     def test_get_model_found(self) -> None:
         mgr = ModelManager()
         with patch.object(mgr, "list_models", return_value=[
@@ -411,36 +387,6 @@ class TestModelManager:
             instance.get.side_effect = ConnectionError
             mgr = ModelManager()
             assert mgr.is_available("ollama") is False
-
-    def test_is_available_llamacpp_true(self) -> None:
-        mgr = ModelManager()
-        with patch.dict("sys.modules", {"llama_cpp": MagicMock()}):
-            assert mgr.is_available("llama.cpp") is True
-
-    def test_is_available_llamacpp_false(self) -> None:
-        mgr = ModelManager()
-        with patch.dict("sys.modules", {}):
-            with patch("importlib.import_module", side_effect=ImportError):
-                pass  # _llamacpp_installed uses try/except ImportError
-        # Actually test properly:
-        original = dict(__import__.__globals__) if hasattr(__import__, "__globals__") else {}
-        # Simpler: mock the import
-        import builtins
-        real_import = builtins.__import__
-
-        def mock_import(name, *args, **kwargs):
-            if name == "llama_cpp":
-                raise ImportError("not installed")
-            return real_import(name, *args, **kwargs)
-
-        with patch("builtins.__import__", side_effect=mock_import):
-            assert mgr.is_available("llama.cpp") is False
-
-    def test_unknown_provider(self) -> None:
-        mgr = ModelManager()
-        assert mgr.list_models("unknown") == []
-        assert mgr.is_available("unknown") is False
-
 
 # =========================================================================
 # OllamaInference
@@ -489,10 +435,15 @@ class TestOllamaInference:
     def test_generate_http_error(self) -> None:
         import httpx
 
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 422
+        mock_response.reason_phrase = "Unprocessable"
+        mock_response.json.return_value = {"error": "bad request"}
+
         with patch("httpx.Client") as mock_client:
             instance = mock_client.return_value.__enter__.return_value
             instance.post.side_effect = httpx.HTTPStatusError(
-                "404", request=MagicMock(), response=MagicMock()
+                "422", request=MagicMock(), response=mock_response
             )
             inf = OllamaInference()
             result = inf.generate("Hello")
@@ -589,131 +540,6 @@ class TestOllamaInference:
 
 
 # =========================================================================
-# LlamaCppInference
-# =========================================================================
-
-
-class TestLlamaCppInference:
-    def test_is_available_false_when_not_installed(self) -> None:
-        import builtins
-        real_import = builtins.__import__
-
-        def mock_import(name: str, *args: Any, **kwargs: Any) -> Any:
-            if name == "llama_cpp":
-                raise ImportError("not installed")
-            return real_import(name, *args, **kwargs)
-
-        with patch("builtins.__import__", side_effect=mock_import):
-            inf = LlamaCppInference()
-            assert inf.is_available() is False
-
-    def test_is_available_false_no_model_file(self, tmp_path: Path) -> None:
-        empty_dir = tmp_path / "llama"
-        empty_dir.mkdir()
-
-        with patch.dict("sys.modules", {"llama_cpp": MagicMock()}):
-            inf = LlamaCppInference()
-            with patch.object(inf, "_resolve_models_dir", return_value=empty_dir):
-                assert inf.is_available() is False
-
-    def test_generate_success(self) -> None:
-        mock_llama = MagicMock()
-        mock_llama.create_completion.return_value = {
-            "choices": [{"text": "Hello world"}],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
-        }
-
-        with patch.dict("sys.modules", {"llama_cpp": MagicMock()}):
-            inf = LlamaCppInference(model_path="/fake/model.gguf")
-            inf._llama = mock_llama
-            result = inf.generate("Hi")
-
-        assert result.success
-        assert result.text == "Hello world"
-        assert result.model_used == "model"
-        assert result.tokens_in == 3
-        assert result.tokens_out == 2
-
-    def test_generate_no_model_raises(self) -> None:
-        with patch.dict("sys.modules", {"llama_cpp": MagicMock()}):
-            inf = LlamaCppInference()
-            inf._model_path = ""
-            with patch.object(inf, "_find_first_gguf", return_value=""):
-                with pytest.raises(FileNotFoundError):
-                    inf._load_model()
-
-    def test_generate_stream(self) -> None:
-        mock_llama = MagicMock()
-        mock_llama.create_completion.return_value = [
-            {"choices": [{"text": "Hello"}]},
-            {"choices": [{"text": " world"}]},
-        ]
-
-        with patch.dict("sys.modules", {"llama_cpp": MagicMock()}):
-            inf = LlamaCppInference(model_path="/fake/model.gguf")
-            inf._llama = mock_llama
-            tokens = list(inf.generate_stream("Hi"))
-
-        assert tokens == ["Hello", " world"]
-
-    def test_chat_success(self) -> None:
-        mock_llama = MagicMock()
-        mock_llama.create_chat_completion.return_value = {
-            "choices": [{"message": {"role": "assistant", "content": "Sure!"}}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
-        }
-
-        with patch.dict("sys.modules", {"llama_cpp": MagicMock()}):
-            inf = LlamaCppInference(model_path="/fake/model.gguf")
-            inf._llama = mock_llama
-            result = inf.chat([{"role": "user", "content": "Help"}])
-
-        assert result.success
-        assert result.text == "Sure!"
-        assert result.tokens_in == 5
-        assert result.tokens_out == 1
-
-    def test_chat_stream(self) -> None:
-        mock_llama = MagicMock()
-        mock_llama.create_chat_completion.return_value = [
-            {"choices": [{"delta": {"content": "Sure"}}]},
-            {"choices": [{"delta": {"content": "!"}}]},
-        ]
-
-        with patch.dict("sys.modules", {"llama_cpp": MagicMock()}):
-            inf = LlamaCppInference(model_path="/fake/model.gguf")
-            inf._llama = mock_llama
-            tokens = list(inf.chat_stream([{"role": "user", "content": "Hi"}]))
-
-        assert tokens == ["Sure", "!"]
-
-    def test_set_model(self) -> None:
-        inf = LlamaCppInference()
-        inf.set_model("/new/path/model.gguf")
-        assert inf._model_path == "/new/path/model.gguf"
-        assert inf._llama is None
-
-    def test_find_first_gguf(self, tmp_path: Path) -> None:
-        models_dir = tmp_path / "llama"
-        models_dir.mkdir()
-        (models_dir / "a.gguf").write_bytes(b"x")
-        (models_dir / "b.gguf").write_bytes(b"y")
-
-        inf = LlamaCppInference()
-        with patch.object(inf, "_resolve_models_dir", return_value=models_dir):
-            found = inf._find_first_gguf()
-        assert found.endswith("a.gguf")
-
-    def test_find_first_gguf_empty(self, tmp_path: Path) -> None:
-        empty = tmp_path / "empty"
-        empty.mkdir()
-        inf = LlamaCppInference()
-        with patch.object(inf, "_resolve_models_dir", return_value=empty):
-            found = inf._find_first_gguf()
-        assert found == ""
-
-
-# =========================================================================
 # Factory
 # =========================================================================
 
@@ -722,14 +548,6 @@ class TestCreateInference:
     def test_ollama_provider(self) -> None:
         engine = create_inference("ollama")
         assert isinstance(engine, OllamaInference)
-
-    def test_llamacpp_provider(self) -> None:
-        engine = create_inference("llama.cpp")
-        assert isinstance(engine, LlamaCppInference)
-
-    def test_llamacpp_alias(self) -> None:
-        engine = create_inference("llamacpp")
-        assert isinstance(engine, LlamaCppInference)
 
     def test_default_provider(self) -> None:
         from config import settings
@@ -801,6 +619,208 @@ class TestBaseInferenceEdgeCases:
         assert result.success
         assert result.text == "ok"
         assert call_count == 2
+
+    def test_auth_header_sent_when_api_key_set(self) -> None:
+        """Verify Authorization header is sent when OLLAMA_API_KEY is set."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "model": "llama3",
+            "response": "ok",
+            "prompt_eval_count": 1,
+            "eval_count": 1,
+        }
+
+        captured_headers: dict[str, str] = {}
+
+        def capture_request(*args: Any, **kwargs: Any) -> MagicMock:
+            captured_headers.update(kwargs.get("headers", {}))
+            return mock_resp
+
+        with patch("httpx.Client") as mock_client:
+            instance = mock_client.return_value.__enter__.return_value
+            instance.post.side_effect = capture_request
+            from config import settings
+
+            original_key = settings.OLLAMA_API_KEY
+            settings.OLLAMA_API_KEY = "test-key-123"
+            try:
+                inf = OllamaInference()
+                result = inf.generate("Hello")
+                assert result.success
+            finally:
+                settings.OLLAMA_API_KEY = original_key
+
+        assert captured_headers.get("Authorization") == "Bearer test-key-123"
+
+    def test_generate_401_error(self) -> None:
+        """Invalid API key returns appropriate error message."""
+        import httpx
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.reason_phrase = "Unauthorized"
+        mock_response.json.return_value = {"error": "invalid API key"}
+
+        with patch("httpx.Client") as mock_client:
+            instance = mock_client.return_value.__enter__.return_value
+            instance.post.side_effect = httpx.HTTPStatusError(
+                "401", request=MagicMock(), response=mock_response
+            )
+            inf = OllamaInference()
+            result = inf.generate("Hello")
+
+        assert not result.success
+        assert "API key" in result.error
+
+    def test_generate_403_error(self) -> None:
+        """Forbidden returns appropriate error message."""
+        import httpx
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+        mock_response.reason_phrase = "Forbidden"
+        mock_response.json.return_value = {"error": "forbidden"}
+
+        with patch("httpx.Client") as mock_client:
+            instance = mock_client.return_value.__enter__.return_value
+            instance.post.side_effect = httpx.HTTPStatusError(
+                "403", request=MagicMock(), response=mock_response
+            )
+            inf = OllamaInference()
+            result = inf.generate("Hello")
+
+        assert not result.success
+        assert "denied" in result.error.lower() or "forbidden" in result.error.lower()
+
+    def test_generate_404_error(self) -> None:
+        """Missing model returns appropriate error message."""
+        import httpx
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_response.reason_phrase = "Not Found"
+        mock_response.json.return_value = {"error": "model not found"}
+
+        with patch("httpx.Client") as mock_client:
+            instance = mock_client.return_value.__enter__.return_value
+            instance.post.side_effect = httpx.HTTPStatusError(
+                "404", request=MagicMock(), response=mock_response
+            )
+            inf = OllamaInference()
+            result = inf.generate("Hello")
+
+        assert not result.success
+        assert "not found" in result.error.lower()
+
+    def test_generate_429_error(self) -> None:
+        """Rate limit is retried then returns exhaustion message."""
+        import httpx
+
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_response.reason_phrase = "Too Many Requests"
+        mock_response.json.return_value = {"error": "rate limit"}
+
+        with patch("httpx.Client") as mock_client:
+            instance = mock_client.return_value.__enter__.return_value
+            instance.post.side_effect = httpx.HTTPStatusError(
+                "429", request=MagicMock(), response=mock_response
+            )
+            inf = OllamaInference()
+            result = inf.generate("Hello")
+
+        assert not result.success
+        assert "exhausted" in result.error
+
+    def test_generate_500_error(self) -> None:
+        """Server error is retried then returns exhaustion message."""
+        import httpx
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.reason_phrase = "Internal Server Error"
+        mock_response.json.return_value = {"error": "server error"}
+
+        with patch("httpx.Client") as mock_client:
+            instance = mock_client.return_value.__enter__.return_value
+            instance.post.side_effect = httpx.HTTPStatusError(
+                "500", request=MagicMock(), response=mock_response
+            )
+            inf = OllamaInference()
+            result = inf.generate("Hello")
+
+        assert not result.success
+        assert "exhausted" in result.error
+
+    def test_connection_error(self) -> None:
+        """Connection error is retried then returns exhaustion message."""
+        import httpx
+
+        with patch("httpx.Client") as mock_client:
+            instance = mock_client.return_value.__enter__.return_value
+            instance.post.side_effect = httpx.ConnectError("connection refused")
+            inf = OllamaInference()
+            result = inf.generate("Hello")
+
+        assert not result.success
+        assert "exhausted" in result.error
+
+    def test_json_decode_error(self) -> None:
+        """Malformed JSON response returns appropriate message."""
+        import json
+
+        mock_response = MagicMock()
+        mock_response.json.side_effect = json.JSONDecodeError("bad json", "bad", 0)
+
+        with patch("httpx.Client") as mock_client:
+            instance = mock_client.return_value.__enter__.return_value
+            instance.post.return_value = mock_response
+            inf = OllamaInference()
+            result = inf.generate("Hello")
+
+        assert not result.success
+        assert "malformed" in result.error.lower()
+
+    def test_retry_handler_429_retry_after(self) -> None:
+        """RetryHandler respects Retry-After header for 429 responses."""
+        import httpx
+
+        def make_429_response() -> MagicMock:
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 429
+            resp.reason_phrase = "Too Many Requests"
+            resp.headers = {"Retry-After": "5"}
+            resp.json.return_value = {"error": "rate limit"}
+            return resp
+
+        mock_ok = MagicMock()
+        mock_ok.json.return_value = {
+            "model": "llama3",
+            "response": "ok",
+            "prompt_eval_count": 1,
+            "eval_count": 1,
+        }
+
+        call_count = [0]
+        with patch("httpx.Client") as mock_client:
+            instance = mock_client.return_value.__enter__.return_value
+            original_post = instance.post
+
+            def side_effect(*args: Any, **kwargs: Any) -> MagicMock:
+                call_count[0] += 1
+                if call_count[0] < 2:
+                    raise httpx.HTTPStatusError(
+                        "429", request=MagicMock(), response=make_429_response()
+                    )
+                return mock_ok
+
+            instance.post.side_effect = side_effect
+            inf = OllamaInference()
+            result = inf.generate("Hello")
+
+        assert result.success
+        assert result.text == "ok"
+        assert call_count[0] == 2
 
 
 class TestAiModuleExport:

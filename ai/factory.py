@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from config import settings
-from ai.inference import BaseInference, OllamaInference, LlamaCppInference
+from ai.inference import BaseInference, OllamaInference
 
 
 def create_inference(provider: str = "") -> BaseInference:
     """Create an inference backend for the named *provider*.
 
     Args:
-        provider: ``"ollama"``, ``"llama.cpp"``, or ``"llamacpp"``.
+        provider: ``"ollama"`` (the only supported provider).
             Defaults to ``settings.LLM_PROVIDER``.
 
     Returns:
@@ -23,8 +23,6 @@ def create_inference(provider: str = "") -> BaseInference:
 
     if provider == "ollama":
         return OllamaInference()
-    if provider in ("llama.cpp", "llamacpp"):
-        return LlamaCppInference()
 
-    msg = f"Unsupported LLM provider: '{provider}'. Use 'ollama' or 'llama.cpp'."
+    msg = f"Unsupported LLM provider: '{provider}'. Only 'ollama' is supported."
     raise ValueError(msg)

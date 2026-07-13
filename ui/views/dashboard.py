@@ -61,7 +61,7 @@ def render() -> None:
         rows = [
             ("Python", health.python.passed),
             ("Tesseract OCR", health.tesseract.passed),
-            ("Ollama", health.ollama.passed),
+            ("Ollama API", health.ollama_api.passed),
             ("FFmpeg", health.ffmpeg.passed),
             ("Poppler", health.poppler.passed),
         ]

@@ -71,10 +71,14 @@ def render() -> None:
         st.markdown("### AI / LLM Configuration")
         col1, col2 = st.columns(2)
         with col1:
-            st.selectbox(
-                "LLM Provider",
-                options=["ollama", "llama_cpp"],
-                index=0 if settings.LLM_PROVIDER == "ollama" else 1,
+            st.text_input(
+                "API Base URL",
+                value=settings.OLLAMA_BASE_URL,
+                disabled=True,
+            )
+            st.text_input(
+                "Model Name",
+                value=settings.OLLAMA_MODEL,
                 disabled=True,
             )
             st.slider(
@@ -85,6 +89,12 @@ def render() -> None:
                 disabled=True,
             )
         with col2:
+            st.text_input(
+                "API Key",
+                value="••••••••" if settings.OLLAMA_API_KEY else "",
+                disabled=True,
+                type="password",
+            )
             st.number_input(
                 "Max Tokens",
                 value=settings.LLM_MAX_TOKENS,

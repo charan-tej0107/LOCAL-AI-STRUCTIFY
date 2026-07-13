@@ -183,6 +183,11 @@ class Settings(BaseSettings):
 
 # Single shared instance — import ``settings`` everywhere else.
 settings = Settings()
+print("=" * 60)
+print("BASE URL :", settings.OLLAMA_BASE_URL)
+print("MODEL    :", settings.OLLAMA_MODEL)
+print("API KEY  :", "SET" if settings.OLLAMA_API_KEY else "NOT SET")
+print("=" * 60)
 
 # Convenience aliases for the most common paths.
 PROJECT_ROOT = settings.PROJECT_ROOT

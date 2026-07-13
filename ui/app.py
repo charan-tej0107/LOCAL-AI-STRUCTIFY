@@ -8,6 +8,7 @@ and routes to the correct page module.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -21,6 +22,12 @@ if str(PROJECT_ROOT) not in sys.path:
 import streamlit as st
 
 from config import settings
+from utils.logger import setup_logging
+
+# Initialize logging when running standalone (streamlit run ui/app.py).
+# Idempotent — safe if app.py launcher already called it.
+level = logging.DEBUG if settings.AI_DEBUG else logging.INFO
+setup_logging(level=level)
 from ui.components import sidebar_brand
 from ui.state import PAGE_KEY, init_session_state
 from ui.styles import inject_css

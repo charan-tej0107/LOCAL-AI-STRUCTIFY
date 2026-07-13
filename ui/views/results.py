@@ -58,23 +58,29 @@ def render() -> None:
         f"{d.filename} — {d.status.value}"
         for d in documents
     ]
+
     selected_label = st.selectbox(
         "Select a document",
         labels,
         key="results_selector",
     )
+
     selected_idx = labels.index(selected_label)
     doc = documents[selected_idx]
 
-    # ── Document header ───────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Document Header
+    # ------------------------------------------------------------------
 
     col1, col2 = st.columns([3, 2])
+
     with col1:
         file_card(
             "📄",
             doc.filename,
             f"{human_readable_size(doc.file_size)} · {doc.mime_type}",
         )
+
     with col2:
         status_badge(doc.status.value)
         st.caption(f"ID: {doc.id}")
@@ -84,20 +90,32 @@ def render() -> None:
         return
 
     doc_type = _get_document_type(doc.structured_json)
+
     col1, col2, col3, col4 = st.columns(4)
+
     with col1:
         st.metric("Document Type", doc_type)
+
     with col2:
-        st.metric("Confidence", _format_confidence(doc.confidence_score))
+        st.metric(
+            "Confidence",
+            _format_confidence(doc.confidence_score),
+        )
+
     with col3:
         st.metric(
             "Processing Time",
-            f"{doc.processing_time:.1f}s" if doc.processing_time else "—",
+            f"{doc.processing_time:.1f}s"
+            if doc.processing_time
+            else "—",
         )
+
     with col4:
         st.metric(
             "Text Length",
-            f"{len(doc.extracted_text):,} chars" if doc.extracted_text else "—",
+            f"{len(doc.extracted_text):,} chars"
+            if doc.extracted_text
+            else "—",
         )
 
     if doc.confidence_score is not None:
@@ -105,53 +123,77 @@ def render() -> None:
 
     st.divider()
 
-    # ── Extracted Text (full, scrollable) ─────────────────────────────
+    # ------------------------------------------------------------------
+    # Extracted Text
+    # ------------------------------------------------------------------
 
     section_header("Extracted Text")
+
     if doc.extracted_text:
         st.text_area(
-            "",
-            doc.extracted_text,
+            "Extracted Text",
+            value=doc.extracted_text,
             height=250,
             key="extracted_text_view",
+            label_visibility="collapsed",
         )
+
         st.download_button(
-            "Download Text",
+            "⬇ Download Text",
             data=doc.extracted_text,
             file_name=f"{doc.filename}_extracted.txt",
             mime="text/plain",
         )
+
     else:
         st.info("No extracted text available yet.")
 
     st.divider()
 
-    # ── Structured JSON ──────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Structured JSON
+    # ------------------------------------------------------------------
 
     section_header("Structured JSON")
+
     if doc.structured_json:
         json_text = _format_json_text(doc.structured_json)
 
-        st.code(json_text, language="json", line_numbers=True)
+        st.code(
+            json_text,
+            language="json",
+            line_numbers=True,
+        )
 
-        col_j1, col_j2, col_j3 = st.columns([1, 1, 1])
-        with col_j1:
+        col1, col2, col3 = st.columns([1, 1, 1])
+
+        with col1:
             st.text_area(
                 "Copy JSON",
                 value=json_text,
-                height=100,
+                height=120,
                 key="json_copy_area",
                 label_visibility="collapsed",
             )
-        with col_j2:
-            if st.button("📋 Copy to Clipboard", key="copy_json_btn"):
-                st.toast("Select all text from the box above and copy (Ctrl+C / ⌘C)")
-        with col_j3:
+
+        with col2:
+            if st.button(
+                "📋 Copy to Clipboard",
+                key="copy_json_btn",
+            ):
+                st.toast(
+                    "Select all text from the box above and press Ctrl+C (⌘C on macOS)."
+                )
+
+        with col3:
             st.download_button(
-                "Download JSON",
+                "⬇ Download JSON",
                 data=json_text,
                 file_name=f"{doc.filename}_result.json",
                 mime="application/json",
             )
+
     else:
-        st.info("No structured output available yet. Process the document first.")
+        st.info(
+            "No structured output available yet. Process the document first."
+        )
